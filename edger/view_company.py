@@ -7,7 +7,8 @@ import pandas as pd
 import streamlit as st
 
 from . import charts, data, fmt, watchlist
-from .metrics import DERIVED_LABELS, METRIC_BY_KEY, cagr, dividend_history, historical_per, yoy
+from .metrics import (DERIVED_LABELS, METRIC_BY_KEY, cagr, dividend_history, historical_per, turnaround, yoy,
+                      yoy_prev)
 from .ui import (kpi_cards, metric_rows, load_dividends, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
                  load_profile, load_snapshot, load_statement, load_table, plot,
                  safe_markdown_text, theme_mode)
@@ -105,8 +106,12 @@ def render(ticker: str) -> None:
         except Exception as exc:
             table = pd.DataFrame()
             st.warning(f"{basis} 데이터를 불러오지 못했습니다: {exc}")
-    _kpis(snap, table, period_key, currency, business)
-    _signals(ticker, snap, table, annual, period_key, business)
+    kpi_table, kpi_period = table, period_key
+    if table.empty and period_key != "annual" and not annual.empty:
+        kpi_table, kpi_period = annual, "annual"
+        st.caption(f"{basis} 데이터가 없어 카드는 연간 기준으로 보여줍니다 (아래 재무 탭 안내 참고).")
+    _kpis(snap, kpi_table, kpi_period, currency, business)
+    _signals(ticker, snap, kpi_table, annual, kpi_period, business)
 
     mode = theme_mode()
     # Stateful tabs: the open tab survives reruns, and only the open tab is rendered, so e.g.
@@ -184,7 +189,8 @@ def _kpis(snap: dict | None, table: pd.DataFrame, period: str, currency: str, bu
         for col, name in BUSINESS[business]["kpis"]:
             value, delta = yoy(table, col, period)
             shown = fmt.per_share(value, currency) if col in PER_SHARE_COLS else fmt.money(value, currency)
-            items.append({"label": name, "value": shown, "delta": delta})
+            items.append({"label": name, "value": shown, "delta": delta,
+                          "word": turnaround(value, yoy_prev(table, col, period))})
         st.markdown(f'<div class="ed-sub" style="margin-top:0.6rem">실적 <b>{html.escape(tag)}</b> · 증감은 {note}</div>',
                     unsafe_allow_html=True)
     stale = (snap or {}).get("stale_since")
@@ -305,8 +311,8 @@ def _financials(ticker: str, table: pd.DataFrame, annual: pd.DataFrame, period_k
                 currency: str, mode: str, business: str) -> None:
     if table.empty:
         if period_key != "annual" and not annual.empty:
-            st.info("분기 재무 데이터가 없습니다. 외국 기업(20-F 제출)은 SEC에 연간 보고서만 XBRL로 제출해서 "
-                    "연간 기준으로만 볼 수 있습니다. 위에서 '연간'을 선택하세요.")
+            st.info("최근 분기 재무 데이터가 없습니다. 외국 기업(20-F 제출)은 SEC에 분기 실적을 XBRL로 내지 않거나 "
+                    "반기(6-K)로만 내서, 연간 기준으로만 볼 수 있습니다. 위에서 '연간'을 선택하세요.")
         else:
             st.info("이 회사는 XBRL 재무 데이터가 없습니다 (펀드, 신규 상장사 등).")
         return
@@ -455,8 +461,9 @@ def _growth(table: pd.DataFrame, period_key: str, cols: list[str]) -> None:
     for col in cols:
         if table[col].isna().all():
             continue
-        _, one = yoy(table, col, period_key)
-        row = {"항목": _label(col), first: fmt.pct(one, signed=True)}
+        latest, one = yoy(table, col, period_key)
+        word = turnaround(latest, yoy_prev(table, col, period_key))
+        row = {"항목": _label(col), first: word or fmt.pct(one, signed=True)}
         if period_key != "quarterly":  # multi-year growth of single quarters is mostly noise
             row["3년 CAGR"] = fmt.pct(cagr(table, col, 3, rows_per_year=rpy), signed=True)
         rows.append(row)

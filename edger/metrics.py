@@ -305,6 +305,12 @@ def _flow_series(sub: pd.DataFrame, period: Period) -> pd.Series:
     sub = sub.dropna(subset=["period_start"])
     if sub.empty:
         return pd.Series(dtype=float)
+    # Earliest filing of each period = as originally reported. Used for derived quarters:
+    # subtracting an original 9-month YTD from a full year restated years later mixes bases
+    # (FRO FY2013 was restated from $517M to $134M, giving Q4 revenue of -$240M).
+    original = (sub.sort_values("filing_date", na_position="last")
+                   .drop_duplicates(subset=["period_start", "period_end"], keep="first").copy())
+    original["days"] = (original["period_end"] - original["period_start"]).dt.days
     sub = _latest_filed(sub, ["period_start", "period_end"]).copy()
     sub["days"] = (sub["period_end"] - sub["period_start"]).dt.days
 
@@ -321,7 +327,7 @@ def _flow_series(sub: pd.DataFrame, period: Period) -> pd.Series:
     # Cash-flow items (and Q4 in general) are only reported year-to-date. Derive the
     # discrete quarter as YTD(end) - YTD(previous end) for facts sharing a start date.
     derived: dict[pd.Timestamp, float] = {}
-    for _, grp in sub.groupby("period_start"):
+    for _, grp in original.groupby("period_start"):
         grp = grp.sort_values("period_end")
         ends = grp["period_end"].tolist()
         vals = grp["numeric_value"].tolist()
@@ -342,7 +348,19 @@ def _instant_series(sub: pd.DataFrame) -> pd.Series:
     return sub.set_index("period_end")["numeric_value"].sort_index()
 
 
+# Amounts that cannot be negative; a negative value can only come from a broken derivation.
+NON_NEGATIVE = frozenset({"revenue", "capex", "da", "dividends", "buybacks", "dps", "shares_diluted",
+                          "premiums", "interest_expense", "_dep", "_amort", "deposits"})
+
+
 def metric_series(facts: pd.DataFrame, metric: Metric, period: Period, currency: str) -> pd.Series:
+    merged = _metric_series(facts, metric, period, currency)
+    if metric.key in NON_NEGATIVE and not merged.empty:
+        merged = merged.where(merged >= 0)
+    return merged
+
+
+def _metric_series(facts: pd.DataFrame, metric: Metric, period: Period, currency: str) -> pd.Series:
     merged = pd.Series(dtype=float)
     for concept in metric.concepts:
         sub = facts[(facts["concept"] == concept)
@@ -352,6 +370,30 @@ def metric_series(facts: pd.DataFrame, metric: Metric, period: Period, currency:
         s = _flow_series(sub, period) if metric.kind == "flow" else _instant_series(sub)
         merged = s if merged.empty else merged.combine_first(s)
     return merged
+
+
+def turnaround(latest: float | None, prev: float | None) -> str | None:
+    """Word for a year-over-year change whose percentage would be meaningless."""
+    if latest is None or prev is None or pd.isna(latest) or pd.isna(prev):
+        return None
+    if prev > 0 and latest < 0:
+        return "적자전환"
+    if prev < 0 and latest > 0:
+        return "흑자전환"
+    if prev < 0 and latest < 0:
+        return "적자지속" if latest <= prev else "적자축소"
+    return None
+
+
+def yoy_prev(table: pd.DataFrame, col: str, period: Period) -> float | None:
+    """The same period a year earlier (previous row for annual, four rows back otherwise)."""
+    if table.empty or col not in table:
+        return None
+    lag = 1 if period == "annual" else 4
+    if len(table) <= lag:
+        return None
+    v = table[col].iloc[-1 - lag]
+    return None if pd.isna(v) else float(v)
 
 
 def yoy(table: pd.DataFrame, col: str, period: Period) -> tuple[float | None, float | None]:
@@ -371,6 +413,8 @@ def yoy(table: pd.DataFrame, col: str, period: Period) -> tuple[float | None, fl
     if len(s) <= lag or pd.isna(s.iloc[-1 - lag]) or s.iloc[-1 - lag] == 0:
         return float(latest), None
     prev = float(s.iloc[-1 - lag])
+    if prev < 0 or latest < 0:  # a % change across or below zero means nothing: see turnaround()
+        return float(latest), None
     return float(latest), (float(latest) - prev) / abs(prev)
 
 
@@ -398,6 +442,12 @@ def build_table(raw_facts: pd.DataFrame, period: Period = "annual", n: int = 8) 
         table = _raw_table(facts, period, currency)
     if table.empty:
         return pd.DataFrame(), currency
+    if period != "annual":
+        # Quarterly history that stopped long before the latest annual report (a company that
+        # moved to half-year 6-K reports, e.g. FRO stops in 2014) must not pass for current.
+        annual = _raw_table(facts, "annual", currency)
+        if not annual.empty and table.index.max() < annual.index.max() - pd.Timedelta(days=200):
+            return pd.DataFrame(), currency
     # Derive on the full history first so averages (ROE, ROIC) have the prior period available.
     return _add_derived(table.copy(), period).tail(n), currency
 

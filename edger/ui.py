@@ -15,7 +15,7 @@ PRICE_TTL = 60 * 15
 
 CSS = """
 <style>
-.block-container {padding-top: 1.2rem; padding-bottom: 3rem; padding-left: 1rem; padding-right: 1rem; max-width: 760px;}
+.block-container {padding-top: 3.2rem; padding-bottom: 3rem; padding-left: 1rem; padding-right: 1rem; max-width: 760px;}
 header[data-testid="stHeader"] {height: 0; background: transparent;}
 h1 {font-size: 1.5rem !important; margin-bottom: 0 !important;}
 h3 {font-size: 1.2rem !important; padding-bottom: 0 !important;}
@@ -329,8 +329,13 @@ def kpi_cards(items: list[dict]) -> None:
     cells = []
     for it in items:
         d = it.get("delta")
-        if d is None or pd.isna(d):
+        word = it.get("word")
+        if word:
+            cls = "ed-good" if word in ("흑자전환", "적자축소") else "ed-bad"
+            delta = f'<div class="ed-kd {cls}">{_html.escape(word)}</div>'
+        elif d is None or pd.isna(d):
             delta = '<div class="ed-kd ed-rn">–</div>'
+
         else:
             cls, arrow = ("ed-good", "▲") if d >= 0 else ("ed-bad", "▼")
             unit = "%p" if it.get("pp") else "%"

@@ -335,3 +335,46 @@ def test_raise_streak_resets_on_cut():
     pay = _pay([*[(f"2021-{m:02d}-01", 0.52) for m in (3, 6, 9, 12)],
                 *[(f"2022-{m:02d}-01", 0.2775) for m in (3, 6, 9, 12)]])
     assert dividend_history(pay, None, today=pd.Timestamp("2023-07-01"))["raise_streak"] == 0
+
+
+def _flow(concept, start, end, value, filed, form="10-Q"):
+    return dict(concept=f"us-gaap:{concept}", unit="USD", period_type="duration", period_start=start,
+                period_end=end, numeric_value=value, filing_date=filed, form_type=form)
+
+
+def test_q4_uses_originally_reported_values():
+    """FRO 2013: FY revenue restated years later ($517M -> $134M). Q4 must come from the
+    original FY minus the original 9-month YTD, not restated FY minus original YTD (-$240M)."""
+    rows = [
+        _flow("Revenues", "2013-01-01", "2013-03-31", 126.0, "2013-05-30"),
+        _flow("Revenues", "2013-04-01", "2013-06-30", 121.0, "2013-08-29"),
+        _flow("Revenues", "2013-01-01", "2013-06-30", 247.0, "2013-08-29"),
+        _flow("Revenues", "2013-07-01", "2013-09-30", 126.0, "2013-12-13"),
+        _flow("Revenues", "2013-01-01", "2013-09-30", 373.0, "2013-12-13"),
+        _flow("Revenues", "2013-01-01", "2013-12-31", 517.0, "2014-03-21", "20-F"),
+        _flow("Revenues", "2013-01-01", "2013-12-31", 134.0, "2016-03-21", "20-F"),  # restated
+    ]
+    q, _ = build_table(pd.DataFrame(rows), "quarterly")
+    assert q.loc["2013-12-31", "revenue"] == pytest.approx(144.0)
+    assert (q["revenue"] >= 0).all()
+
+
+def test_stale_quarterly_history_is_hidden():
+    """Quarterly data that stopped years before the latest annual report (moved to half-year
+    reports) must not be shown as the current quarter."""
+    rows = [_flow("Revenues", f"2013-{m:02d}-01", f"2013-{m + 2:02d}-{30 if m + 2 in (6, 9) else 31}", 100.0, "2014-01-01")
+            for m in (1, 4, 7)]
+    rows += [_flow("Revenues", f"{y}-01-01", f"{y}-12-31", 500.0, f"{y + 1}-03-01", "20-F") for y in range(2013, 2026)]
+    df = pd.DataFrame(rows)
+    assert build_table(df, "quarterly")[0].empty
+    assert build_table(df, "ttm")[0].empty
+    assert not build_table(df, "annual")[0].empty
+
+
+@pytest.mark.parametrize("latest,prev,word", [
+    (-65.5, 0.127, "적자전환"), (10.0, -5.0, "흑자전환"), (-8.0, -5.0, "적자지속"), (-3.0, -5.0, "적자축소"),
+    (10.0, 5.0, None),
+])
+def test_turnaround(latest, prev, word):
+    from edger.metrics import turnaround
+    assert turnaround(latest, prev) == word
