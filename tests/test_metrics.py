@@ -103,4 +103,51 @@ def test_valuation_multiples():
 def test_deep_metrics_present(facts):
     table, _ = build_table(facts, "annual", 8)
     assert table["roe"].notna().all() and table["roic"].notna().all()
-    assert table["net_debt"].isna().all()  # demo has no debt tags: unknown, not "-cash"
+    assert (table["net_debt"] == table["debt"] - table["cash"]).all()
+    assert table["ebitda"].notna().all() and table["current_ratio"].notna().all()
+
+
+def test_net_debt_unknown_without_debt_tags():
+    def row(concept, kind, value):
+        return dict(concept=concept, unit="USD", period_type=kind,
+                    period_start="2022-01-01" if kind == "duration" else None, period_end="2022-12-31",
+                    numeric_value=value, filing_date="2023-02-01", form_type="10-K")
+    table, _ = build_table(pd.DataFrame([row("us-gaap:Revenues", "duration", 100.0),
+                                         row("us-gaap:CashAndCashEquivalentsAtCarryingValue", "instant", 30.0)]))
+    assert table["net_debt"].isna().all()  # not "-cash"
+    assert table["ebitda"].isna().all()  # no D&A tag: no EBITDA rather than EBIT
+
+
+def test_normalize_xbrl_statement_shape():
+    """Shape of edgartools Statement.to_dataframe(): concept/label/period columns/level/abstract/unit."""
+    raw = pd.DataFrame({
+        "concept": ["us-gaap_IncomeStatementAbstract", "us-gaap_Revenues", "us-gaap_NetIncomeLoss",
+                    "us-gaap_EarningsPerShareDiluted", "us-gaap_Revenues"],
+        "label": ["Income Statement", "Total net sales", "Net income", "Diluted EPS", "Products"],
+        "2025-09-27 (FY)": [None, 416e9, 112e9, 7.46, 300e9],
+        "2024-09-28 (FY)": [None, 391e9, 94e9, 6.08, 290e9],
+        "2023-09-30 (FY)": [None, 383e9, 97e9, 6.13, 280e9],
+        "2022-09-24 (FY)": [None, 394e9, 100e9, 6.11, 270e9],
+        "level": [0, 1, 1, 1, 2],
+        "abstract": [True, False, False, False, False],
+        "dimension": [False, False, False, False, True],
+        "unit": [None, "usd", "usd", "usdPerShare", "usd"],
+        "balance": [None, "credit", "credit", None, "credit"],
+    })
+    from edger.data import normalize_xbrl_statement
+    out = normalize_xbrl_statement(raw)
+    assert list(out.columns) == ["label", "depth", "is_abstract", "kind", "25.09", "24.09", "23.09"]
+    assert out["label"].tolist() == ["Income Statement", "Total net sales", "Net income", "Diluted EPS"]
+    assert out["kind"].tolist() == ["money", "money", "money", "per_share"]
+    assert out.loc[1, "25.09"] == 416e9
+
+
+def test_normalize_prefers_quarter_over_ytd():
+    from edger.data import normalize_xbrl_statement
+    raw = pd.DataFrame({"label": ["Revenue"], "2025-06-28 (YTD)": [300.0], "2025-06-28 (Q3)": [100.0],
+                        "2024-06-29 (Q3)": [90.0], "level": [0], "abstract": [False], "unit": ["usd"]})
+    out = normalize_xbrl_statement(raw)
+    assert [c for c in out.columns if "." in c] == ["25.06 Q3", "24.06 Q3"]
+    # cash-flow statements in a 10-Q are year-to-date only: keep those
+    ytd = normalize_xbrl_statement(raw.drop(columns=["2025-06-28 (Q3)", "2024-06-29 (Q3)"]))
+    assert [c for c in ytd.columns if "." in c] == ["25.06 누적"]

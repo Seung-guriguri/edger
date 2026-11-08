@@ -133,7 +133,8 @@ def per_bars(per: pd.DataFrame, mode: str, current: float | None = None) -> go.F
     return fig
 
 
-def compare_lines(series: dict[str, pd.Series], mode: str, *, percent: bool, currency: str = "USD") -> go.Figure:
+def compare_lines(series: dict[str, pd.Series], mode: str, *, percent: bool, currency: str = "USD",
+                  per_share: bool = False) -> go.Figure:
     """One line per ticker over fiscal-year labels. ``series`` keeps the watchlist order."""
     p = PALETTE[mode]
     fig = go.Figure()
@@ -142,7 +143,8 @@ def compare_lines(series: dict[str, pd.Series], mode: str, *, percent: bool, cur
             continue
         color = p["series"][i % len(p["series"])]
         y = s * 100 if percent else s
-        text = [fmt.pct(v) if percent else fmt.money(v, currency) for v in s]
+        text = [fmt.pct(v) if percent else fmt.per_share(v, currency) if per_share else fmt.money(v, currency)
+                for v in s]
         fig.add_trace(go.Scatter(
             x=list(s.index), y=y, name=ticker, mode="lines+markers",
             line=dict(width=2, color=color), marker=dict(size=8, color=color),
@@ -151,6 +153,8 @@ def compare_lines(series: dict[str, pd.Series], mode: str, *, percent: bool, cur
     fig = _base(fig, mode, height=260)
     if percent:
         fig.update_yaxes(ticksuffix="%")
+    elif per_share:
+        fig.update_yaxes(tickprefix="$" if currency == "USD" else "")
     else:
         top = max((float(s.abs().max()) for s in series.values() if s is not None and not s.dropna().empty), default=0)
         div, suffix = fmt.scale_for(top)

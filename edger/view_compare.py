@@ -14,8 +14,10 @@ MAX_COMPARE = 5
 COMPARE_METRICS = {
     "매출": ("revenue", False),
     "매출 성장률": ("revenue_growth", True),
+    "EPS": ("eps", False),
     "영업이익률": ("operating_margin", True),
     "순이익률": ("net_margin", True),
+    "EBITDA 마진": ("ebitda_margin", True),
     "FCF 마진": ("fcf_margin", True),
     "ROE": ("roe", True),
     "ROIC": ("roic", True),
@@ -82,6 +84,8 @@ def _table(snaps: dict) -> None:
             "일간": fmt.pct(q.get("change"), signed=True),
             "시총": fmt.money(s.get("market_cap")),
             "PER": f"{v['per']:.1f}" if v.get("per") else "–",
+            "EV/EBITDA": f"{v['ev_ebitda']:.1f}" if v.get("ev_ebitda") else "–",
+            "EPS": fmt.per_share(v.get("eps")),
             "매출↑": fmt.pct(growth, signed=True),
             "영업이익률": fmt.pct(om.iloc[-1]) if len(om) else "–",
             "ROE": fmt.pct(roe.iloc[-1]) if len(roe) else "–",
@@ -94,7 +98,7 @@ def _table(snaps: dict) -> None:
         _open_company(rows[sel[0]]["티커"])
         del st.session_state["wl_table"]  # otherwise coming back would jump straight away again
         st.rerun()
-    st.caption("매출↑ = 최근 회계연도 매출 증가율, PER = 최근 4분기 기준.")
+    st.caption("매출↑ = 최근 회계연도 매출 증가율. PER·EV/EBITDA·EPS = 최근 4분기 기준.")
 
 
 def _compare(snaps: dict) -> None:
@@ -122,7 +126,7 @@ def _compare(snaps: dict) -> None:
         series[t] = pd.Series(values.values, index=annual["label"].values).tail(8)
     labels = sorted({lbl for s in series.values() if s is not None for lbl in s.index})
     series = {t: (s.reindex(labels) if s is not None else None) for t, s in series.items()}
-    plot(charts.compare_lines(series, theme_mode(), percent=percent))
+    plot(charts.compare_lines(series, theme_mode(), percent=percent, per_share=(col == "eps")))
 
     names = []
     for t in chosen:

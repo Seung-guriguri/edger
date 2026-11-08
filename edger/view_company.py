@@ -99,9 +99,16 @@ def _kpis(snap: dict | None, annual: pd.DataFrame, currency: str) -> None:
         items += [
             (f"매출 · {last_label}", fmt.money(rev, currency), rev_d, {"help": "전년 대비 증감률"}),
             (f"순이익 · {last_label}", fmt.money(ni, currency), ni_d, {"help": "전년 대비 증감률"}),
-            ("영업이익률", fmt.pct(om.iloc[-1]) if len(om) else "–",
-             (om.iloc[-1] - om.iloc[-2]) if len(om) > 1 else None, {"pp": True, "help": "전년 대비 %p 변화"}),
         ]
+        v = snap["valuation"] if snap else {}
+        eps_val = v.get("eps")
+        if eps_val is None:
+            eps_val, eps_d = change(annual, "eps")
+            eps_label = f"EPS · {last_label}"
+        else:
+            eps_d, eps_label = v.get("eps_growth"), "EPS · 최근 4분기"
+        items.append((eps_label, fmt.per_share(eps_val, currency), eps_d,
+                      {"help": "희석 주당순이익, 1년 전 같은 기간 대비"}))
         roe = annual["roe"].dropna()
         items.append(("ROE", fmt.pct(roe.iloc[-1]) if len(roe) else "–",
                       (roe.iloc[-1] - roe.iloc[-2]) if len(roe) > 1 else None,
@@ -126,8 +133,9 @@ def _financials(ticker: str, annual: pd.DataFrame, currency: str, mode: str) -> 
         st.info("이 회사는 XBRL 재무 데이터가 없습니다 (펀드, 신규 상장사, 일부 외국 기업 등).")
         return
 
-    choices = {"매출": "revenue", "영업이익": "operating_income", "순이익": "net_income",
-               "FCF": "fcf", "EPS": "eps", "주식수": "shares_diluted"}
+    choices = {"매출": "revenue", "영업이익": "operating_income", "EBITDA": "ebitda",
+               "순이익": "net_income", "EPS": "eps", "FCF": "fcf", "배당(DPS)": "dps",
+               "주식수": "shares_diluted"}
     choices = {k: v for k, v in choices.items() if table[v].notna().any()}
     pick = st.pills("지표", list(choices), default=next(iter(choices)), key="metric_pick",
                     label_visibility="collapsed") or next(iter(choices))
@@ -135,31 +143,41 @@ def _financials(ticker: str, annual: pd.DataFrame, currency: str, mode: str) -> 
     unit_note = "주" if col == "shares_diluted" else currency
     st.markdown(f"**{_label(col)}** <span class='ed-meta'>({unit_note})</span>", unsafe_allow_html=True)
     plot(charts.bar_series(table.dropna(subset=[col]), col, mode,
-                           "" if col == "shares_diluted" else currency, per_share=(col == "eps")))
+                           "" if col == "shares_diluted" else currency, per_share=(col in ("eps", "dps"))))
     if col == "shares_diluted":
         st.caption("가중평균 희석주식수. 줄어들면 자사주 매입, 늘어나면 주식 발행·보상 효과입니다.")
 
     st.markdown("**마진**")
-    plot(charts.margin_lines(table, {"gross_margin": "매출총이익률", "operating_margin": "영업이익률",
-                                     "net_margin": "순이익률"}, mode))
+    plot(charts.margin_lines(table, {"gross_margin": "매출총이익률", "ebitda_margin": "EBITDA 마진",
+                                     "operating_margin": "영업이익률", "net_margin": "순이익률"}, mode))
 
     if period == "연간" and table[["roe", "roic"]].notna().any().any():
         st.markdown("**자본 수익률**")
-        plot(charts.margin_lines(table, {"roe": "ROE", "roic": "ROIC"}, mode))
+        plot(charts.margin_lines(table, {"roe": "ROE", "roic": "ROIC", "roa": "ROA"}, mode))
         st.caption("ROE = 순이익 ÷ 평균 자본. ROIC = 세후 영업이익 ÷ 평균 투하자본(자본 + 차입금 − 현금), "
-                   "세율은 실효세율(없으면 21%).")
+                   "세율은 실효세율(없으면 21%). ROA = 순이익 ÷ 평균 총자산.")
 
     if period == "연간":
         _growth(table)
 
     latest = table.iloc[-1]
-    st.markdown(f"**재무상태** <span class='ed-meta'>{latest['label']} 기준</span>", unsafe_allow_html=True)
+    yearly = annual.iloc[-1] if not annual.empty else latest  # ratios that need a full year of flows
+
+    def times(x):
+        return f"{x:.1f}배" if x is not None and pd.notna(x) else "–"
+
+    st.markdown(f"**재무 안정성** <span class='ed-meta'>{latest['label']} 기준</span>", unsafe_allow_html=True)
     kpi_grid([
         ("현금성자산", fmt.money(latest["cash"], currency)),
-        ("총차입금", fmt.money(latest["debt"], currency), None, {"help": "단기 + 장기 차입금(사채 포함)"}),
         ("순차입금", fmt.money(latest["net_debt"], currency), None,
-         {"help": "총차입금 − 현금. 음수면 순현금 상태"}),
+         {"help": "총차입금(단기+장기) − 현금. 음수면 순현금"}),
         ("부채비율", fmt.pct(latest["debt_ratio"], 0), None, {"help": "총부채 ÷ 자본총계"}),
+        ("유동비율", fmt.pct(latest["current_ratio"], 0), None,
+         {"help": "유동자산 ÷ 유동부채. 100% 미만이면 1년 내 갚을 돈이 더 많음"}),
+        ("이자보상배율", times(yearly["interest_coverage"]), None,
+         {"help": f"영업이익 ÷ 이자비용 ({yearly['label']}). 높을수록 이자 부담이 작음"}),
+        ("순차입금/EBITDA", times(yearly.get("net_debt_ebitda")), None,
+         {"help": f"빚을 영업현금으로 몇 년에 갚는지 ({yearly['label']}). 3배 이상이면 부담"}),
     ], "bs")
 
     _statements(ticker, "annual" if period == "연간" else "quarterly", currency)
@@ -194,31 +212,36 @@ def _statements(ticker: str, period: str, currency: str) -> None:
     kinds = {"손익계산서": "income", "재무상태표": "balance", "현금흐름표": "cashflow"}
     pick = st.segmented_control("재무제표", list(kinds), default="손익계산서", key="stmt_kind",
                                 label_visibility="collapsed") or "손익계산서"
-    try:
-        df = load_statement(ticker, kinds[pick], period)
-    except Exception as exc:
-        df = pd.DataFrame()
-        st.caption(f"재무제표를 만들지 못했습니다: {exc}")
+    with st.spinner("재무제표 불러오는 중… (처음엔 공시 원문을 받느라 몇 초 걸립니다)"):
+        try:
+            res = load_statement(ticker, kinds[pick], period)
+        except Exception as exc:
+            res = {"table": pd.DataFrame(), "source": "", "error": str(exc)}
+    df = res["table"]
     if df.empty:
-        st.caption("이 기간의 재무제표를 만들 수 없습니다. 다른 기간(연간/분기)을 선택해 보세요.")
+        st.warning("재무제표를 불러오지 못했습니다." + (f" ({res['error']})" if res.get("error") else ""))
         return
-    value_cols = [c for c in df.columns if c not in ("label", "depth", "is_abstract", "is_total")][:3]
+    value_cols = [c for c in df.columns if c not in data.STATEMENT_COLUMNS]
+
+    def cell(v, kind):
+        if pd.isna(v):
+            return ""
+        if kind == "per_share":
+            return fmt.per_share(v, currency)
+        if kind == "shares":
+            return fmt.number(v) + "주"
+        return fmt.money(v, currency)
+
     rows = []
-    for r in df.itertuples(index=False):
-        rec = r._asdict()
-        depth = int(rec.get("depth") or 0)
-        label = (" " * depth) + str(rec.get("label", ""))
-        if rec.get("is_abstract"):
-            if all(pd.isna(rec.get(c)) for c in value_cols):
-                rows.append({"항목": label, **{c: "" for c in value_cols}})
-            continue
-        is_eps = "pershare" in str(rec.get("label", "")).replace(" ", "").lower() or \
-            "earningspershare" in str(rec.get("label", "")).replace(" ", "").lower()
-        rows.append({"항목": label, **{c: (fmt.per_share(rec.get(c), currency) if is_eps
-                                          else fmt.money(rec.get(c), currency)) for c in value_cols}})
+    for rec in df.to_dict("records"):  # not itertuples: period names like "25.09" get mangled
+        label = ("\u2003" * max(int(rec["depth"]), 0)) + rec["label"]
+        if rec["is_abstract"]:
+            label = f"▸ {label}"
+        rows.append({"항목": label, **{c: cell(rec[c], rec["kind"]) for c in value_cols}})
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
-                 height=min(38 + 35 * len(rows), 520))
-    st.caption("edgartools가 XBRL 데이터로 재구성한 표입니다. 최근 3개 기간을 보여줍니다.")
+                 height=min(38 + 35 * len(rows), 560),
+                 column_config={"항목": st.column_config.TextColumn(width="medium")})
+    st.caption(f"출처: {res['source']}. 최근 {len(value_cols)}개 기간. 표를 옆으로 밀면 다른 기간이 보입니다.")
 
 
 # ---------------------------------------------------------------- 주가·가치
@@ -254,16 +277,40 @@ def _valuation(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: s
                 unsafe_allow_html=True)
 
     def mult(x):
-        return f"{x:.1f}배" if x is not None else "–"
+        return f"{x:.1f}배" if x is not None and pd.notna(x) else "–"
 
     kpi_grid([
-        ("PER", mult(v["per"]), None, {"help": "시가총액 ÷ 최근 4분기 순이익 (적자면 –)"}),
-        ("PSR", mult(v["psr"]), None, {"help": "시가총액 ÷ 최근 4분기 매출"}),
-        ("PBR", mult(v["pbr"]), None, {"help": "시가총액 ÷ 최근 자본총계"}),
-        ("EV/EBIT", mult(v["ev_ebit"]), None, {"help": "기업가치(시총 + 차입금 − 현금) ÷ 최근 4분기 영업이익"}),
-        ("FCF 수익률", fmt.pct(v["fcf_yield"]), None, {"help": "최근 4분기 잉여현금흐름 ÷ 시가총액"}),
-        ("기업가치(EV)", fmt.money(v["ev"], currency), None, {"help": "시가총액 + 총차입금 − 현금"}),
+        ("PER", mult(v["per"]), None, {"help": "주가수익비율 = 시가총액 ÷ 순이익. 적자면 –"}),
+        ("PBR", mult(v["pbr"]), None, {"help": "주가순자산비율 = 시가총액 ÷ 자본총계"}),
+        ("PSR", mult(v["psr"]), None, {"help": "주가매출비율 = 시가총액 ÷ 매출"}),
+        ("P/FCF", mult(v["p_fcf"]), None, {"help": "시가총액 ÷ 잉여현금흐름"}),
+        ("EV/EBITDA", mult(v["ev_ebitda"]), None,
+         {"help": "기업가치 ÷ EBITDA(영업이익 + 감가상각비). 부채 수준이 다른 회사끼리 비교할 때 유용"}),
+        ("EV/EBIT", mult(v["ev_ebit"]), None, {"help": "기업가치 ÷ 영업이익"}),
+        ("EV/매출", mult(v["ev_sales"]), None, {"help": "기업가치 ÷ 매출"}),
+        ("PEG", f"{v['peg']:.2f}" if v["peg"] else "–", None,
+         {"help": "PER ÷ EPS 3년 연평균 성장률(%). 1 미만이면 성장 대비 싸다는 신호로 봄"}),
     ], "val")
+    st.caption(f"기업가치(EV) = 시가총액 + 총차입금 − 현금 = {fmt.money(v['ev'], currency)}")
+
+    st.markdown("**주당 지표**", unsafe_allow_html=True)
+    kpi_grid([
+        ("EPS", fmt.per_share(v["eps"], currency), v["eps_growth"],
+         {"help": "희석 주당순이익 (최근 4분기 합), 1년 전 같은 기간 대비"}),
+        ("BPS", fmt.per_share(v["bps"], currency), None, {"help": "주당순자산 = 자본총계 ÷ 주식수"}),
+        ("DPS", fmt.per_share(v["dps"], currency), None, {"help": "주당배당금 (최근 4분기)"}),
+        ("주식수", fmt.number(v["shares"]) + "주" if v["shares"] else "–", None,
+         {"help": "시가총액 ÷ 주가로 계산한 발행주식수"}),
+    ], "ps")
+
+    st.markdown("**주주환원**", unsafe_allow_html=True)
+    kpi_grid([
+        ("배당수익률", fmt.pct(v["dividend_yield"], 2), None, {"help": "배당금 지급액 ÷ 시가총액"}),
+        ("배당성향", fmt.pct(v["payout_ratio"], 0), None, {"help": "배당금 ÷ 순이익"}),
+        ("자사주 매입 수익률", fmt.pct(v["buyback_yield"], 2), None, {"help": "자사주 매입액 ÷ 시가총액"}),
+        ("총 주주수익률", fmt.pct(v["shareholder_yield"], 2), None,
+         {"help": "배당 + 자사주 매입을 합한 주주환원율"}),
+    ], "sh")
 
     per = historical_per(annual, prices)
     if not per.empty and per["per"].notna().sum() >= 2:

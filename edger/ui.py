@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from . import charts, data, market
-from .metrics import build_table, latest_shares_outstanding, ttm, valuation
+from .metrics import TTM_FLOWS, build_table, cagr, latest_shares_outstanding, ttm, valuation
 
 CACHE_TTL = 60 * 60 * 6  # SEC data changes slowly; also keeps us far below the 10 req/s limit
 PRICE_TTL = 60 * 15
@@ -69,7 +69,7 @@ def load_table(ticker: str, period: str, n: int):
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def load_statement(ticker: str, kind: str, period: str) -> pd.DataFrame:
+def load_statement(ticker: str, kind: str, period: str) -> dict:
     return data.fetch_statement(ticker, kind, period)
 
 
@@ -104,13 +104,14 @@ def load_snapshot(ticker: str) -> dict:
     annual, currency = load_table(ticker, "annual", 10)
     quarterly, _ = load_table(ticker, "quarterly", 12)
     q = load_quote(ticker)
-    flows = ttm(quarterly)
-    if flows is None and not annual.empty:  # fall back to the latest fiscal year
-        last = annual.iloc[-1]
-        flows = {"label": last["label"], "end": annual.index[-1],
-                 **{k: (None if pd.isna(last.get(k)) else float(last.get(k)))
-                    for k in ("revenue", "gross_profit", "operating_income", "net_income", "eps",
-                              "ocf", "capex", "fcf")}}
+    flows, prev_flows = ttm(quarterly), ttm(quarterly, offset=4)
+    if flows is None and not annual.empty:  # fall back to the latest fiscal years
+        def fy(row_idx):
+            last = annual.iloc[row_idx]
+            return {"label": last["label"], "end": annual.index[row_idx],
+                    **{k: (None if pd.isna(last.get(k)) else float(last.get(k))) for k in TTM_FLOWS}}
+        flows = fy(-1)
+        prev_flows = fy(-2) if len(annual) > 1 else None
     balance_src = quarterly if not quarterly.empty else annual
     balance = balance_src.iloc[-1] if not balance_src.empty else None
 
@@ -118,9 +119,11 @@ def load_snapshot(ticker: str) -> dict:
     if not market_cap and q.get("price"):
         shares = latest_shares_outstanding(load_facts(ticker))
         market_cap = q["price"] * shares if shares else None
+    val = valuation(market_cap, flows, balance, price=q.get("price"), prev_flows=prev_flows,
+                    eps_cagr=cagr(annual, "eps", 3))
     return {
         "quote": q, "market_cap": market_cap, "currency": currency, "ttm": flows,
-        "balance": balance, "valuation": valuation(market_cap, flows, balance),
+        "balance": balance, "valuation": val,
         "annual": annual,
     }
 

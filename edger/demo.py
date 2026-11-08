@@ -49,9 +49,12 @@ def _company_facts_json(ticker: str = TICKER) -> dict:
     rng = np.random.default_rng(seed)
     flows = {k: [] for k in ("Revenues", "GrossProfit", "OperatingIncomeLoss", "NetIncomeLoss",
                              "EarningsPerShareDiluted", "NetCashProvidedByUsedInOperatingActivities",
-                             "PaymentsToAcquirePropertyPlantAndEquipment")}
+                             "PaymentsToAcquirePropertyPlantAndEquipment",
+                             "DepreciationDepletionAndAmortization", "InterestExpense",
+                             "PaymentsOfDividendsCommonStock", "PaymentsForRepurchaseOfCommonStock")}
     instants = {k: [] for k in ("CashAndCashEquivalentsAtCarryingValue", "Assets", "Liabilities",
-                                "StockholdersEquity")}
+                                "StockholdersEquity", "AssetsCurrent", "LiabilitiesCurrent",
+                                "LongTermDebtNoncurrent")}
     shares = 1.2e9
     revenue_fy = revenue_start
     assets = 40e9
@@ -76,9 +79,14 @@ def _company_facts_json(ticker: str = TICKER) -> dict:
             "EarningsPerShareDiluted": q_rev * nm / shares,
             "NetCashProvidedByUsedInOperatingActivities": q_rev * (nm + 0.07),
             "PaymentsToAcquirePropertyPlantAndEquipment": q_rev * 0.05,
+            "DepreciationDepletionAndAmortization": q_rev * 0.04,
+            "InterestExpense": q_rev * 0.008,
+            "PaymentsOfDividendsCommonStock": q_rev * nm * 0.3,
+            "PaymentsForRepurchaseOfCommonStock": q_rev * nm * 0.4,
         }
         ytd_only = {"NetCashProvidedByUsedInOperatingActivities",
-                    "PaymentsToAcquirePropertyPlantAndEquipment"}
+                    "PaymentsToAcquirePropertyPlantAndEquipment", "DepreciationDepletionAndAmortization",
+                    "PaymentsOfDividendsCommonStock", "PaymentsForRepurchaseOfCommonStock"}
         for concept, qv in values.items():
             for q in range(3):  # 10-Q facts
                 filed = (ends[q] + timedelta(days=35)).isoformat()
@@ -101,7 +109,9 @@ def _company_facts_json(ticker: str = TICKER) -> dict:
             form, filed = ("10-K", filed_k) if q == 3 else ("10-Q", (ends[q] + timedelta(days=35)).isoformat())
             for concept, v in (("Assets", assets), ("StockholdersEquity", equity),
                                ("Liabilities", assets - equity),
-                               ("CashAndCashEquivalentsAtCarryingValue", assets * 0.12)):
+                               ("CashAndCashEquivalentsAtCarryingValue", assets * 0.12),
+                               ("AssetsCurrent", assets * 0.35), ("LiabilitiesCurrent", assets * 0.22),
+                               ("LongTermDebtNoncurrent", assets * 0.18)):
                 instants[concept].append({"end": ends[q].isoformat(), "val": round(float(v), 2), "fy": fy,
                                           "fp": "FY" if q == 3 else f"Q{q + 1}", "form": form, "filed": filed})
 

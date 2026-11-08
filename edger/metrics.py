@@ -115,6 +115,47 @@ METRICS: tuple[Metric, ...] = (
         "us-gaap:ShortTermBorrowings",
         "ifrs-full:CurrentBorrowings",
     )),
+    Metric("da", "감가상각비", "flow", (
+        "us-gaap:DepreciationDepletionAndAmortization",
+        "us-gaap:DepreciationAmortizationAndAccretionNet",
+        "us-gaap:DepreciationAndAmortization",
+        "us-gaap:DepreciationAmortizationAndOther",
+        "us-gaap:Depreciation",
+        "ifrs-full:AdjustmentsForDepreciationAndAmortisationExpense",
+        "ifrs-full:DepreciationAndAmortisationExpense",
+    )),
+    Metric("interest_expense", "이자비용", "flow", (
+        "us-gaap:InterestExpense",
+        "us-gaap:InterestExpenseNonoperating",
+        "us-gaap:InterestExpenseDebt",
+        "us-gaap:InterestAndDebtExpense",
+        "ifrs-full:FinanceCosts",
+        "ifrs-full:InterestExpense",
+    )),
+    Metric("dividends", "배당금 지급", "flow", (
+        "us-gaap:PaymentsOfDividendsCommonStock",
+        "us-gaap:PaymentsOfDividends",
+        "us-gaap:PaymentsOfOrdinaryDividends",
+        "ifrs-full:DividendsPaidClassifiedAsFinancingActivities",
+        "ifrs-full:DividendsPaid",
+    )),
+    Metric("buybacks", "자사주 매입", "flow", (
+        "us-gaap:PaymentsForRepurchaseOfCommonStock",
+        "us-gaap:PaymentsForRepurchaseOfEquity",
+        "ifrs-full:PaymentsToAcquireOrRedeemEntitysShares",
+    )),
+    Metric("dps", "주당배당금", "flow", (
+        "us-gaap:CommonStockDividendsPerShareDeclared",
+        "us-gaap:CommonStockDividendsPerShareCashPaid",
+    ), unit="per_share"),
+    Metric("current_assets", "유동자산", "instant", (
+        "us-gaap:AssetsCurrent",
+        "ifrs-full:CurrentAssets",
+    )),
+    Metric("current_liabilities", "유동부채", "instant", (
+        "us-gaap:LiabilitiesCurrent",
+        "ifrs-full:CurrentLiabilities",
+    )),
 )
 
 # Shares outstanding from the filing cover page (dei); used for market cap.
@@ -136,6 +177,13 @@ DERIVED_LABELS = {
     "fcf_margin": "FCF 마진",
     "roe": "ROE",
     "roic": "ROIC",
+    "roa": "ROA",
+    "ebitda": "EBITDA",
+    "ebitda_margin": "EBITDA 마진",
+    "current_ratio": "유동비율",
+    "interest_coverage": "이자보상배율",
+    "net_debt_ebitda": "순차입금/EBITDA",
+    "payout_ratio": "배당성향",
 }
 
 _ANNUAL_DAYS = (330, 400)
@@ -282,7 +330,17 @@ def build_table(raw_facts: pd.DataFrame, period: Period = "annual", n: int = 8) 
     table["debt"] = table["debt_long"].fillna(0) + table["debt_short"].fillna(0)
     table.loc[table["debt_long"].isna() & table["debt_short"].isna(), "debt"] = np.nan
     table["net_debt"] = table["debt"] - table["cash"].fillna(0)  # unknown when debt is untagged
+    table["ebitda"] = table["operating_income"] + table["da"]  # NaN when D&A is not tagged
+    table["ebitda_margin"] = table["ebitda"] / rev
+    table["current_ratio"] = table["current_assets"] / table["current_liabilities"].where(
+        table["current_liabilities"] > 0)
+    table["interest_coverage"] = table["operating_income"] / table["interest_expense"].where(
+        table["interest_expense"] > 0)
+    table["payout_ratio"] = table["dividends"] / table["net_income"].where(table["net_income"] > 0)
     if period == "annual":
+        table["net_debt_ebitda"] = table["net_debt"] / table["ebitda"].where(table["ebitda"] > 0)
+        avg_assets = ((table["assets"] + table["assets"].shift(1)) / 2).fillna(table["assets"])
+        table["roa"] = table["net_income"] / avg_assets.where(avg_assets > 0)
         # Returns use average capital over the year; the first row falls back to year-end.
         avg_eq = ((table["equity"] + table["equity"].shift(1)) / 2).fillna(table["equity"])
         table["roe"] = table["net_income"] / avg_eq.where(avg_eq > 0)
@@ -292,8 +350,8 @@ def build_table(raw_facts: pd.DataFrame, period: Period = "annual", n: int = 8) 
         avg_inv = ((invested + invested.shift(1)) / 2).fillna(invested)
         table["roic"] = nopat / avg_inv.where(avg_inv > 0)
     else:
-        table["roe"] = np.nan
-        table["roic"] = np.nan
+        for col in ("roe", "roic", "roa", "net_debt_ebitda"):
+            table[col] = np.nan
 
     table.insert(0, "label", [period_label(d, period) for d in table.index])
     table.index.name = "period_end"
@@ -327,17 +385,20 @@ def cagr(table: pd.DataFrame, col: str, years: int) -> float | None:
     return (end / start) ** (1 / years) - 1
 
 
-TTM_FLOWS = ("revenue", "gross_profit", "operating_income", "net_income", "eps", "ocf", "capex", "fcf")
+TTM_FLOWS = ("revenue", "gross_profit", "operating_income", "net_income", "eps", "ocf", "capex", "fcf",
+             "da", "ebitda", "interest_expense", "dividends", "buybacks", "dps")
 
 
-def ttm(quarterly: pd.DataFrame) -> dict | None:
-    """Sum of the latest four consecutive quarters for flow metrics.
+def ttm(quarterly: pd.DataFrame, offset: int = 0) -> dict | None:
+    """Sum of four consecutive quarters for flow metrics: the latest four, or with
+    ``offset=4`` the four before those (for year-over-year TTM comparison).
 
-    Returns None when the last four quarters are not contiguous (e.g. missing filings).
+    Returns None when those quarters are not contiguous (e.g. missing filings).
     """
-    if quarterly is None or len(quarterly) < 4:
+    if quarterly is None or len(quarterly) < 4 + offset:
         return None
-    last4 = quarterly.tail(4)
+    end = len(quarterly) - offset
+    last4 = quarterly.iloc[end - 4:end]
     gaps = pd.Series(last4.index).diff().dt.days.dropna()
     if not gaps.between(80, 100).all():
         return None
@@ -363,9 +424,20 @@ def latest_shares_outstanding(raw_facts: pd.DataFrame) -> float | None:
     return float(same["numeric_value"].drop_duplicates().sum())
 
 
-def valuation(market_cap: float | None, flows: dict | None, balance: pd.Series | None) -> dict:
-    """Valuation multiples from market cap, trailing flows and the latest balance sheet."""
-    out = {k: None for k in ("per", "psr", "pbr", "fcf_yield", "ev", "ev_ebit")}
+VALUATION_KEYS = ("per", "psr", "pbr", "p_fcf", "fcf_yield", "ev", "ev_ebit", "ev_ebitda", "ev_sales",
+                  "peg", "eps", "eps_growth", "bps", "dps", "dividend_yield", "buyback_yield",
+                  "shareholder_yield", "payout_ratio", "shares")
+
+
+def valuation(market_cap: float | None, flows: dict | None, balance: pd.Series | None, *,
+              price: float | None = None, prev_flows: dict | None = None,
+              eps_cagr: float | None = None) -> dict:
+    """Valuation multiples and per-share figures.
+
+    ``flows`` are trailing-twelve-month sums (or the latest fiscal year), ``prev_flows`` the
+    twelve months before that, ``eps_cagr`` a multi-year EPS growth rate used for PEG.
+    """
+    out = {k: None for k in VALUATION_KEYS}
     if not market_cap or market_cap <= 0 or not flows:
         return out
 
@@ -385,6 +457,30 @@ def valuation(market_cap: float | None, flows: dict | None, balance: pd.Series |
         cash = balance.get("cash")
         out["ev"] = market_cap + (0 if debt is None or pd.isna(debt) else debt) - (0 if cash is None or pd.isna(cash) else cash)
         out["ev_ebit"] = ratio(out["ev"], flows.get("operating_income"))
+        out["ev_ebitda"] = ratio(out["ev"], flows.get("ebitda"))
+        out["ev_sales"] = ratio(out["ev"], flows.get("revenue"))
+    out["p_fcf"] = ratio(market_cap, flows.get("fcf"))
+
+    out["eps"] = flows.get("eps")
+    if prev_flows and out["eps"] is not None:
+        prev_eps = prev_flows.get("eps")
+        if prev_eps is not None and prev_eps > 0:
+            out["eps_growth"] = out["eps"] / prev_eps - 1
+    if out["per"] and eps_cagr and eps_cagr > 0:
+        out["peg"] = out["per"] / (eps_cagr * 100)
+
+    shares = market_cap / price if price else None
+    out["shares"] = shares
+    if shares and balance is not None:
+        out["bps"] = ratio(balance.get("equity"), shares, positive_den=True)
+    dividends, buybacks = flows.get("dividends"), flows.get("buybacks")
+    out["dps"] = flows.get("dps") or (ratio(dividends, shares) if shares else None)
+    # Missing tags stay None ("–"), not 0%: an untagged quarter is not proof of no dividend.
+    out["dividend_yield"] = ratio(dividends, market_cap)
+    out["buyback_yield"] = ratio(buybacks, market_cap)
+    if out["dividend_yield"] is not None or out["buyback_yield"] is not None:
+        out["shareholder_yield"] = (out["dividend_yield"] or 0) + (out["buyback_yield"] or 0)
+    out["payout_ratio"] = ratio(dividends, flows.get("net_income")) if dividends is not None else None
     return out
 
 

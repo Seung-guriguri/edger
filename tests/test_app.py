@@ -27,7 +27,8 @@ def test_company_view_renders():
 def test_valuation_tab():
     at = run(tab="💹 주가·가치", t="DEMO")
     labels = [m.label for m in at.metric]
-    for expected in ("52주 최고", "PER", "PBR", "EV/EBIT", "FCF 수익률"):
+    for expected in ("52주 최고", "PER", "PBR", "EV/EBITDA", "EV/EBIT", "PEG", "EPS", "BPS", "배당수익률",
+                     "총 주주수익률"):
         assert expected in labels, (expected, labels)
 
 
@@ -36,12 +37,16 @@ def test_insider_tab():
     assert "장내 매수" in [m.label for m in at.metric]
 
 
-def test_quarterly_and_statements():
+def test_statements_never_blank():
     at = run(t="DEMO")
-    at.segmented_control(key="period").set_value("분기").run()
-    assert not at.exception
-    at.segmented_control(key="stmt_kind").set_value("현금흐름표").run()
-    assert not at.exception
+    for period in ("연간", "분기"):
+        at.segmented_control(key="period").set_value(period).run()
+        for kind in ("손익계산서", "재무상태표", "현금흐름표"):
+            at.segmented_control(key="stmt_kind").set_value(kind).run()
+            assert not at.exception
+            assert not at.warning, (period, kind, [w.value for w in at.warning])
+    labels = [m.label for m in at.metric]
+    assert "이자보상배율" in labels and "유동비율" in labels
 
 
 def test_filing_reader():
@@ -71,3 +76,12 @@ def test_star_adds_to_watchlist():
 def test_empty_state():
     at = run()
     assert any("DEMO" in i.value for i in at.info)
+
+
+def test_compare_eps_and_table_columns():
+    at = run(v="watch")
+    at.text_input(key="wl_add").set_value("DEMO DEMOB").run()
+    at.pills(key="cmp_metric").set_value("EPS").run()
+    assert not at.exception
+    cols = list(at.dataframe[0].value.columns)
+    assert "EV/EBITDA" in cols and "EPS" in cols

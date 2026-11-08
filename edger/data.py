@@ -6,6 +6,7 @@ The ticker ``DEMO`` returns synthetic data from :mod:`edger.demo` without touchi
 from __future__ import annotations
 
 import os
+import re
 import time
 from functools import lru_cache
 
@@ -151,26 +152,154 @@ def fetch_insider_trades(ticker: str, n_filings: int = 40) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- full statements
 STATEMENTS = {"income": "income_statement", "balance": "balance_sheet", "cashflow": "cash_flow_statement"}
+STATEMENT_COLUMNS = ["label", "depth", "is_abstract", "kind"]
+MAX_STATEMENT_PERIODS = 3
+# XBRL statement period columns look like "2025-09-27", "2025-09-27 (FY)", "2025-06-28 (Q3)" or "(YTD)".
+_PERIOD_COL = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:\s*\((FY|YTD|Q\d)\))?$")
+_SUFFIX = {None: "", "FY": "", "YTD": " 누적"}
 
 
-def fetch_statement(ticker: str, kind: str, period: str = "annual", periods: int = 4) -> pd.DataFrame:
-    """A full financial statement built by edgartools from XBRL facts.
+def _value_kind(unit: str, label: str = "") -> str:
+    u, lbl = (unit or "").lower(), (label or "").lower()
+    if "share" in u and ("per" in u or "/" in u) or "per share" in lbl:
+        return "per_share"
+    if u in ("shares", "share") or (not u and "shares outstanding" in lbl):
+        return "shares"
+    return "money"
 
-    Columns: label, depth, is_abstract, is_total, then one column per period (newest first).
+
+def normalize_xbrl_statement(raw: pd.DataFrame, max_periods: int = MAX_STATEMENT_PERIODS) -> pd.DataFrame:
+    """edgartools ``Statement.to_dataframe()`` -> label/depth/is_abstract/kind + period columns.
+
+    Keeps the newest ``max_periods`` periods, preferring discrete periods (FY, quarters) over
+    year-to-date columns when both exist (10-Q income statements show both).
     """
-    if is_demo(ticker):
-        facts = demo.entity_facts(ticker)
-    else:
-        facts = get_company(ticker).get_facts()
+    if raw is None or isinstance(raw, str) or raw.empty:
+        return pd.DataFrame()
+    if "dimension" in raw.columns:
+        raw = raw[~raw["dimension"].fillna(False).astype(bool)]
+    periods = []
+    for col in raw.columns:
+        m = _PERIOD_COL.match(str(col))
+        if m:
+            periods.append((f"{m.group(1)}-{m.group(2)}-{m.group(3)}", m.group(4), col))
+    if not periods:
+        return pd.DataFrame()
+    discrete = [p for p in periods if p[1] != "YTD"]
+    chosen = sorted(discrete or periods, key=lambda p: p[0], reverse=True)
+    seen, cols, names = set(), [], []
+    for date_s, suffix, col in chosen:
+        name = f"{date_s[2:4]}.{date_s[5:7]}" + _SUFFIX.get(suffix, f" {suffix}")
+        if name in seen:
+            continue
+        seen.add(name)
+        cols.append(col)
+        names.append(name)
+        if len(cols) == max_periods:
+            break
+
+    out = pd.DataFrame({
+        "label": raw.get("label", pd.Series([""] * len(raw), index=raw.index)).astype(str),
+        "depth": pd.to_numeric(raw.get("level", 0), errors="coerce").fillna(0).astype(int),
+        "is_abstract": raw.get("abstract", False),
+    })
+    out["is_abstract"] = out["is_abstract"].fillna(False).astype(bool)
+    units = raw["unit"] if "unit" in raw.columns else pd.Series([""] * len(raw), index=raw.index)
+    out["kind"] = [_value_kind(str(u) if pd.notna(u) else "", lbl) for u, lbl in zip(units, out["label"])]
+    for col, name in zip(cols, names):
+        out[name] = pd.to_numeric(raw[col], errors="coerce")
+    empty = out[names].isna().all(axis=1) & ~out["is_abstract"]
+    out = out[~empty]
+    return out.reset_index(drop=True) if out[names].notna().any().any() else pd.DataFrame()
+
+
+def _statement_from_filing(ticker: str, kind: str, period: str) -> tuple[pd.DataFrame, str]:
+    c = get_company(ticker)
+    fin = c.get_financials() if period == "annual" else c.get_quarterly_financials()
+    if fin is None:
+        return pd.DataFrame(), ""
+    stmt = getattr(fin, STATEMENTS[kind])()
+    if stmt is None:
+        return pd.DataFrame(), ""
+    try:
+        raw = stmt.to_dataframe(view="summary", include_unit=True)
+    except TypeError:  # older/newer signature
+        raw = stmt.to_dataframe()
+    return normalize_xbrl_statement(raw), ("최근 10-K" if period == "annual" else "최근 10-Q") + " 공시 원문 XBRL"
+
+
+def _statement_from_facts(ticker: str, kind: str, period: str) -> tuple[pd.DataFrame, str]:
+    facts = demo.entity_facts(ticker) if is_demo(ticker) else get_company(ticker).get_facts()
     if facts is None:
-        return pd.DataFrame()
-    df = getattr(facts, STATEMENTS[kind])(periods=periods, period=period, as_dataframe=True)
-    if df is None or df.empty:
-        return pd.DataFrame()
-    meta = [c for c in ("label", "depth", "is_abstract", "is_total") if c in df.columns]
+        return pd.DataFrame(), ""
+    df = getattr(facts, STATEMENTS[kind])(periods=MAX_STATEMENT_PERIODS, period=period, as_dataframe=True)
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame(), ""
     value_cols = [c for c in df.columns if c not in ("label", "depth", "is_abstract", "is_total",
-                                                       "section", "confidence")]
-    return df[meta + value_cols].reset_index(drop=True)
+                                                       "section", "confidence")][:MAX_STATEMENT_PERIODS]
+    out = pd.DataFrame({
+        "label": df["label"].astype(str).values,
+        "depth": pd.to_numeric(df.get("depth", 0), errors="coerce").fillna(0).astype(int).values,
+        "is_abstract": df.get("is_abstract", False).fillna(False).astype(bool).values,
+        "kind": ["per_share" if "PerShare" in str(c) else "shares" if str(c).endswith("Shares") else "money"
+                 for c in df.index],
+    })
+    for c in value_cols:
+        out[str(c)] = pd.to_numeric(df[c], errors="coerce").values
+    return out, "XBRL 데이터에서 재구성"
+
+
+KEY_LINES = {
+    "income": ["revenue", "gross_profit", "operating_income", "interest_expense", "pretax_income",
+               "income_tax", "net_income", "eps", "shares_diluted"],
+    "balance": ["cash", "current_assets", "assets", "current_liabilities", "debt_short", "debt_long",
+                "liabilities", "equity"],
+    "cashflow": ["ocf", "da", "capex", "fcf", "dividends", "buybacks"],
+}
+
+
+def _statement_from_key_lines(ticker: str, kind: str, period: str) -> tuple[pd.DataFrame, str]:
+    """Last resort: the main line items the dashboard already computes."""
+    from .metrics import DERIVED_LABELS, METRIC_BY_KEY, build_table
+
+    table, _ = build_table(fetch_facts(ticker), period, MAX_STATEMENT_PERIODS)
+    if table.empty:
+        return pd.DataFrame(), ""
+    table = table.iloc[::-1]
+    rows = []
+    for key in KEY_LINES[kind]:
+        if key not in table or table[key].isna().all():
+            continue
+        m = METRIC_BY_KEY.get(key)
+        rows.append({"label": DERIVED_LABELS.get(key) or m.label, "depth": 0, "is_abstract": False,
+                     "kind": m.unit if m else "money",
+                     **{lbl: v for lbl, v in zip(table["label"], table[key])}})
+    return pd.DataFrame(rows), "주요 항목만 (XBRL 데이터에서 계산)"
+
+
+def fetch_statement(ticker: str, kind: str, period: str = "annual") -> dict:
+    """Full statement as {"table": DataFrame, "source": str, "error": str | None}.
+
+    Primary source is the XBRL of the latest 10-K / 10-Q (exact line items and order as filed).
+    If that fails or is empty, falls back to rebuilding it from the company facts API.
+    """
+    error = None
+    if not is_demo(ticker):
+        try:
+            table, source = _statement_from_filing(ticker, kind, period)
+            if not table.empty:
+                return {"table": table, "source": source, "error": None}
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+    for builder in (_statement_from_facts, _statement_from_key_lines):
+        try:
+            table, source = builder(ticker, kind, period)
+        except Exception as exc:
+            table, source = pd.DataFrame(), ""
+            error = error or f"{type(exc).__name__}: {exc}"
+        if not table.empty:
+            return {"table": table, "source": source, "error": None}
+    return {"table": pd.DataFrame(), "source": "", "error": error}
 
 
 # ---------------------------------------------------------------- reading filings
