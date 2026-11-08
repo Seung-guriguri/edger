@@ -1,14 +1,22 @@
-"""Stock prices. SEC has no market data, so prices come from Yahoo Finance via yfinance.
+"""Stock prices. SEC has no market data, so prices come from Yahoo Finance (yfinance), with
+Stooq's free daily CSV as a fallback: Yahoo often rate-limits shared cloud hosts such as
+Streamlit Community Cloud.
 
-Every function degrades to empty results instead of raising: Yahoo rate-limits and changes
-its API from time to time, and the dashboard must keep working on SEC data alone.
+Every function degrades to empty results instead of raising, and records which source
+answered, so the dashboard keeps working on SEC data alone.
 """
 from __future__ import annotations
+
+import io
+import urllib.request
 
 import numpy as np
 import pandas as pd
 
 from . import demo
+
+_EMPTY = pd.Series(dtype=float, name="close")
+_UA = "Mozilla/5.0 (compatible; edger-dashboard)"
 
 
 def _demo_prices(ticker: str = demo.TICKER) -> pd.Series:
@@ -20,39 +28,88 @@ def _demo_prices(ticker: str = demo.TICKER) -> pd.Series:
     return pd.Series(start * np.exp(np.cumsum(steps)), index=idx, name="close")
 
 
-def price_history(ticker: str, period: str = "10y") -> pd.Series:
-    """Daily closing prices (tz-naive DatetimeIndex). Empty Series on failure."""
-    if demo.is_demo(ticker):
-        s = _demo_prices(ticker)
-        years = int(period.rstrip("y")) if period.endswith("y") else 10
-        return s[s.index >= s.index[-1] - pd.DateOffset(years=years)]
+def _years(period: str) -> int:
+    return int(period[:-1]) if period.endswith("y") and period[:-1].isdigit() else 10
+
+
+def _yahoo_history(ticker: str, period: str) -> pd.Series:
     try:
         import yfinance as yf
 
         hist = yf.Ticker(ticker).history(period=period, interval="1d", auto_adjust=False)
     except Exception:
-        return pd.Series(dtype=float, name="close")
+        return _EMPTY
     if hist is None or hist.empty or "Close" not in hist:
-        return pd.Series(dtype=float, name="close")
+        return _EMPTY
     s = hist["Close"].dropna()
     s.index = pd.DatetimeIndex(s.index).tz_localize(None).normalize()
     return s.rename("close")
 
 
-def quote(ticker: str) -> dict:
-    """Latest price, daily change, market cap and currency. Missing values are None."""
-    out = {"price": None, "prev_close": None, "change": None, "market_cap": None,
-           "shares": None, "currency": "USD"}
+def stooq_symbol(ticker: str) -> str:
+    # Stooq writes US share classes with a dash (BRK.B -> brk-b.us).
+    return ticker.lower().replace(".", "-").replace("/", "-") + ".us"
+
+
+def parse_stooq_csv(text: str) -> pd.Series:
+    if not text or not text.lstrip().lower().startswith("date"):
+        return _EMPTY  # "No data" or a rate-limit notice instead of CSV
+    df = pd.read_csv(io.StringIO(text))
+    if "Date" not in df or "Close" not in df:
+        return _EMPTY
+    s = pd.Series(pd.to_numeric(df["Close"], errors="coerce").values,
+                  index=pd.to_datetime(df["Date"], errors="coerce"), name="close")
+    return s[s.index.notna()].dropna().sort_index()
+
+
+def _stooq_history(ticker: str) -> pd.Series:
+    url = f"https://stooq.com/q/d/l/?s={stooq_symbol(ticker)}&i=d"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _UA})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return parse_stooq_csv(resp.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return _EMPTY
+
+
+def price_history(ticker: str, period: str = "10y") -> pd.Series:
+    """Daily closing prices (tz-naive DatetimeIndex). Empty Series when every source fails."""
     if demo.is_demo(ticker):
         s = _demo_prices(ticker)
-        out.update(price=float(s.iloc[-1]), prev_close=float(s.iloc[-2]), shares=1.2e9)
     else:
-        try:
-            import yfinance as yf
+        s = _yahoo_history(ticker, period)
+        if s.empty:
+            s = _stooq_history(ticker)
+    if s.empty:
+        return _EMPTY
+    return s[s.index >= s.index[-1] - pd.DateOffset(years=_years(period))]
 
-            fi = yf.Ticker(ticker).fast_info
-        except Exception:
-            return out
+
+def empty_quote() -> dict:
+    return {"price": None, "prev_close": None, "change": None, "market_cap": None,
+            "shares": None, "currency": "USD", "source": None}
+
+
+def quote(ticker: str) -> dict:
+    """Latest price, daily change, market cap and currency. Missing values are None.
+
+    Price falls back from Yahoo's quote to Yahoo's recent history to Stooq. Market cap is
+    only filled when Yahoo provides it (or its share count); callers compute it from SEC
+    share counts otherwise.
+    """
+    out = empty_quote()
+    if demo.is_demo(ticker):
+        s = _demo_prices(ticker)
+        out.update(price=float(s.iloc[-1]), prev_close=float(s.iloc[-2]), shares=1.2e9, source="예시")
+        return _finish(out)
+
+    try:
+        import yfinance as yf
+
+        fi = yf.Ticker(ticker).fast_info
+    except Exception:
+        fi = None
+    if fi is not None:
         # Each field is a separate lazy lookup on Yahoo's side; one failing must not
         # discard the others.
         for key, field in (("price", "last_price"), ("prev_close", "previous_close"),
@@ -65,6 +122,22 @@ def quote(ticker: str) -> dict:
             out["currency"] = fi.get("currency") or "USD"
         except Exception:
             pass
+        if out["price"]:
+            out["source"] = "Yahoo Finance"
+
+    if not out["price"]:
+        for name, history in (("Yahoo Finance", lambda: _yahoo_history(ticker, "5d")),
+                              ("Stooq", lambda: _stooq_history(ticker))):
+            s = history()
+            if not s.empty:
+                out["price"] = float(s.iloc[-1])
+                out["prev_close"] = float(s.iloc[-2]) if len(s) > 1 else None
+                out["source"] = name
+                break
+    return _finish(out)
+
+
+def _finish(out: dict) -> dict:
     if out["price"] and out["prev_close"]:
         out["change"] = out["price"] / out["prev_close"] - 1
     if out["market_cap"] is None and out["price"] and out["shares"]:

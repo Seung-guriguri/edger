@@ -8,7 +8,7 @@ import streamlit as st
 
 from . import charts, data, fmt, watchlist
 from .metrics import DERIVED_LABELS, METRIC_BY_KEY, cagr, change, historical_per
-from .ui import (kpi_grid, load_filing_sections, load_filings, load_insiders, load_prices,
+from .ui import (kpi_grid, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
                  load_profile, load_snapshot, load_statement, load_table, plot,
                  safe_markdown_text, theme_mode)
 
@@ -86,11 +86,12 @@ def _kpis(snap: dict | None, annual: pd.DataFrame, currency: str) -> None:
         q = snap["quote"]
         if q.get("price"):
             items.append(("주가", fmt.per_share(q["price"], q.get("currency", "USD")), q.get("change"),
-                          {"help": "전일 대비"}))
+                          {"help": f"전일 대비 · 출처: {q.get('source') or '–'}"}))
         if snap.get("market_cap"):
             per = snap["valuation"].get("per")
             items.append(("시가총액", fmt.money(snap["market_cap"], q.get("currency", "USD")),
-                          f"PER {per:.1f}배" if per else None, {"neutral": True}))
+                          f"PER {per:.1f}배" if per else None,
+                          {"neutral": True, "help": f"계산 방식: {snap.get('cap_source')}"}))
     if not annual.empty:
         last_label = annual["label"].iloc[-1]
         rev, rev_d = change(annual, "revenue")
@@ -251,7 +252,7 @@ _RANGES = {"1년": 1, "3년": 3, "5년": 5, "10년": 10}
 def _valuation(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: str, mode: str) -> None:
     prices = load_prices(ticker, "10y")
     if prices.empty:
-        st.info("주가 데이터를 불러오지 못했습니다 (Yahoo Finance 일시 오류이거나 비상장·외국 종목). "
+        st.info("주가 차트를 불러오지 못했습니다 (Yahoo Finance·Stooq 모두 응답 없음, 또는 비상장·외국 종목). "
                 "재무·공시 탭은 정상적으로 볼 수 있습니다.")
     else:
         rng = st.segmented_control("기간", list(_RANGES), default="1년", key="price_range",
@@ -269,7 +270,7 @@ def _valuation(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: s
         ], "range")
 
     if not snap or not snap.get("market_cap"):
-        st.info("시가총액을 계산할 수 없어 밸류에이션 지표를 표시하지 않습니다.")
+        _no_market_cap(snap)
         return
     v, flows = snap["valuation"], snap["ttm"] or {}
     basis = flows.get("label", "")
@@ -321,6 +322,17 @@ def _valuation(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: s
         if v["per"]:
             st.caption(f"과거 {len(hist)}년 PER 중앙값 {hist.median():.1f}배 · 현재 {v['per']:.1f}배")
     st.caption("주가는 Yahoo Finance(15분 캐시), 실적은 SEC 공시 기준이라 발표 직후엔 시차가 있을 수 있습니다.")
+
+
+def _no_market_cap(snap: dict | None) -> None:
+    if snap and snap["quote"].get("price"):
+        reason = ("주가는 받았지만 발행주식수를 찾지 못했습니다 "
+                  "(Yahoo 시총 없음, SEC 공시에 주식수·희석주식수 없음).")
+    else:
+        reason = ("주가를 받지 못했습니다. Yahoo Finance와 예비 출처(Stooq) 모두 응답이 없었습니다. "
+                  "무료 서버는 여러 앱이 같은 IP를 써서 Yahoo가 잠시 막는 경우가 많습니다.")
+    st.info(f"시가총액을 계산할 수 없어 밸류에이션 지표를 표시하지 않습니다. {reason}")
+    st.button("🔄 주가 다시 불러오기", key="retry_prices", on_click=retry_prices, width="stretch")
 
 
 # ---------------------------------------------------------------- 공시

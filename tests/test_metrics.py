@@ -151,3 +151,38 @@ def test_normalize_prefers_quarter_over_ytd():
     # cash-flow statements in a 10-Q are year-to-date only: keep those
     ytd = normalize_xbrl_statement(raw.drop(columns=["2025-06-28 (Q3)", "2024-06-29 (Q3)"]))
     assert [c for c in ytd.columns if "." in c] == ["25.06 누적"]
+
+
+def test_parse_stooq_csv():
+    from edger.market import parse_stooq_csv, stooq_symbol
+    s = parse_stooq_csv("Date,Open,High,Low,Close,Volume\n2026-11-05,1,2,0.5,10.5,100\n2026-11-06,1,2,0.5,11,100\n")
+    assert s.tolist() == [10.5, 11.0] and str(s.index[-1].date()) == "2026-11-06"
+    assert parse_stooq_csv("No data").empty
+    assert parse_stooq_csv("Exceeded the daily hits limit").empty
+    assert stooq_symbol("BRK.B") == "brk-b.us"
+
+
+def test_quote_falls_back_when_yahoo_fails(monkeypatch):
+    from edger import market
+    import sys, types
+    fake = types.ModuleType("yfinance")
+    class Boom:
+        def __init__(self, *a): raise RuntimeError("Too Many Requests")
+    fake.Ticker = Boom
+    monkeypatch.setitem(sys.modules, "yfinance", fake)
+    hist = pd.Series([100.0, 110.0], index=pd.to_datetime(["2026-11-05", "2026-11-06"]), name="close")
+    monkeypatch.setattr(market, "_stooq_history", lambda t: hist)
+    q = market.quote("AAPL")
+    assert q["price"] == 110.0 and q["source"] == "Stooq" and q["change"] == pytest.approx(0.1)
+    assert q["market_cap"] is None  # left to the caller (SEC share count)
+
+
+def test_market_cap_fallback_chain(monkeypatch):
+    from edger import ui
+    annual = pd.DataFrame({"shares_diluted": [9.0, 10.0]})
+    monkeypatch.setattr(ui, "load_facts", lambda t: pd.DataFrame(columns=["concept", "numeric_value"]))
+    cap, src = ui.market_cap_estimate("X", {"price": 5.0, "market_cap": None}, pd.DataFrame(), annual)
+    assert cap == 50.0 and "희석" in src
+    cap, src = ui.market_cap_estimate("X", {"price": 5.0, "market_cap": 99.0}, pd.DataFrame(), annual)
+    assert cap == 99.0
+    assert ui.market_cap_estimate("X", {"price": None}, pd.DataFrame(), annual) == (None, None)

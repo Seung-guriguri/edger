@@ -88,19 +88,93 @@ def load_insiders(ticker: str, n: int) -> pd.DataFrame:
     return data.fetch_insider_trades(ticker, n)
 
 
+class _NoPrice(Exception):
+    """Raised inside cached loaders so that a failed price lookup is not cached."""
+
+
 @st.cache_data(ttl=PRICE_TTL, show_spinner=False)
+def _cached_prices(ticker: str, period: str) -> pd.Series:
+    s = market.price_history(ticker, period)
+    if s.empty:
+        raise _NoPrice(ticker)
+    return s
+
+
+@st.cache_data(ttl=PRICE_TTL, show_spinner=False)
+def _cached_quote(ticker: str) -> dict:
+    q = market.quote(ticker)
+    if not q.get("price"):
+        raise _NoPrice(ticker)
+    return q
+
+
+_RETRY_AFTER = 90  # seconds before retrying a failed price lookup (avoids hammering on every tap)
+
+
+def _recently_failed(key: str) -> bool:
+    import time
+
+    failed = st.session_state.setdefault("_price_failures", {})
+    return time.time() - failed.get(key, 0) < _RETRY_AFTER
+
+
+def _mark_failed(key: str) -> None:
+    import time
+
+    st.session_state.setdefault("_price_failures", {})[key] = time.time()
+
+
 def load_prices(ticker: str, period: str = "10y") -> pd.Series:
-    return market.price_history(ticker, period)
+    key = f"hist:{ticker}:{period}"
+    if _recently_failed(key):
+        return pd.Series(dtype=float, name="close")
+    try:
+        return _cached_prices(ticker, period)
+    except _NoPrice:
+        _mark_failed(key)
+        return pd.Series(dtype=float, name="close")
 
 
-@st.cache_data(ttl=PRICE_TTL, show_spinner=False)
 def load_quote(ticker: str) -> dict:
-    return market.quote(ticker)
+    key = f"quote:{ticker}"
+    if _recently_failed(key):
+        return market.empty_quote()
+    try:
+        return _cached_quote(ticker)
+    except _NoPrice:
+        _mark_failed(key)
+        return market.empty_quote()
 
 
-@st.cache_data(ttl=PRICE_TTL, show_spinner=False)
+def retry_prices() -> None:
+    """Forget failures so the next run asks the price sources again."""
+    st.session_state.pop("_price_failures", None)
+
+
+def market_cap_estimate(ticker: str, q: dict, quarterly: pd.DataFrame, annual: pd.DataFrame
+                        ) -> tuple[float | None, str | None]:
+    """(market cap, how it was obtained). Tries, in order: Yahoo's market cap, price x SEC
+    cover-page shares outstanding, price x latest diluted weighted-average shares."""
+    if q.get("market_cap"):
+        return q["market_cap"], "Yahoo Finance 시가총액"
+    price = q.get("price")
+    if not price:
+        return None, None
+    shares = latest_shares_outstanding(load_facts(ticker))
+    if shares:
+        return price * shares, "주가 × SEC 공시 발행주식수"
+    for table in (quarterly, annual):
+        if not table.empty and table["shares_diluted"].notna().any():
+            return price * float(table["shares_diluted"].dropna().iloc[-1]), "주가 × 희석주식수(추정)"
+    return None, None
+
+
 def load_snapshot(ticker: str) -> dict:
-    """Everything the valuation cards and the watchlist table need for one company."""
+    """Everything the valuation cards and the watchlist table need for one company.
+
+    Not cached itself (it only combines cached pieces), so a price that arrives after an
+    earlier failure shows up immediately.
+    """
     annual, currency = load_table(ticker, "annual", 10)
     quarterly, _ = load_table(ticker, "quarterly", 12)
     q = load_quote(ticker)
@@ -115,14 +189,11 @@ def load_snapshot(ticker: str) -> dict:
     balance_src = quarterly if not quarterly.empty else annual
     balance = balance_src.iloc[-1] if not balance_src.empty else None
 
-    market_cap = q.get("market_cap")
-    if not market_cap and q.get("price"):
-        shares = latest_shares_outstanding(load_facts(ticker))
-        market_cap = q["price"] * shares if shares else None
+    market_cap, cap_source = market_cap_estimate(ticker, q, quarterly, annual)
     val = valuation(market_cap, flows, balance, price=q.get("price"), prev_flows=prev_flows,
                     eps_cagr=cagr(annual, "eps", 3))
     return {
-        "quote": q, "market_cap": market_cap, "currency": currency, "ttm": flows,
+        "quote": q, "market_cap": market_cap, "cap_source": cap_source, "currency": currency, "ttm": flows,
         "balance": balance, "valuation": val,
         "annual": annual,
     }
