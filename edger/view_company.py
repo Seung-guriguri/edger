@@ -8,13 +8,62 @@ import streamlit as st
 
 from . import charts, data, fmt, watchlist
 from .metrics import DERIVED_LABELS, METRIC_BY_KEY, cagr, dividend_history, historical_per, yoy
-from .ui import (kpi_grid, load_dividends, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
+from .ui import (kpi_grid, metric_rows, load_dividends, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
                  load_profile, load_snapshot, load_statement, load_table, plot,
                  safe_markdown_text, theme_mode)
 
 
 BASES = {"연간": "annual", "TTM": "ttm", "분기": "quarterly"}
 BASIS_NOTE = {"annual": "전년 대비", "ttm": "1년 전 TTM 대비", "quarterly": "전년 같은 분기 대비"}
+# What each business type shows. Columns are table keys; labels override the defaults so a
+# bank's "revenue" reads as net revenue. per_share columns are formatted as $ per share.
+BUSINESS = {
+    "general": {
+        "name": "",
+        "kpis": [("revenue", "매출"), ("operating_income", "영업이익"), ("net_income", "순이익"), ("eps", "EPS")],
+        "pills": {"매출": "revenue", "영업이익": "operating_income", "EBITDA": "ebitda", "순이익": "net_income",
+                  "EPS": "eps", "FCF": "fcf", "배당(DPS)": "dps", "주식수": "shares_diluted"},
+        "margins": {"gross_margin": "매출총이익률", "ebitda_margin": "EBITDA 마진",
+                    "operating_margin": "영업이익률", "net_margin": "순이익률"},
+        "growth": ["revenue", "operating_income", "net_income", "eps", "fcf"],
+        "summary": ["revenue", "operating_income", "net_income", "fcf"],
+    },
+    "bank": {
+        "name": "은행",
+        "kpis": [("revenue", "순영업수익"), ("net_interest_income", "순이자이익"), ("net_income", "순이익"),
+                 ("eps", "EPS")],
+        "pills": {"순영업수익": "revenue", "순이자이익": "net_interest_income", "비이자이익": "noninterest_income",
+                  "대손비용": "provision", "순이익": "net_income", "EPS": "eps", "배당(DPS)": "dps"},
+        "margins": {"efficiency_ratio": "효율성 비율(낮을수록 좋음)", "net_margin": "순이익률"},
+        "growth": ["revenue", "net_interest_income", "net_income", "eps"],
+        "summary": ["revenue", "net_interest_income", "provision", "net_income"],
+        "note": "은행은 매출총이익·영업이익·유동비율 같은 일반 기업 지표가 맞지 않아 순이자이익, 효율성 비율"
+                "(비이자비용 ÷ 순영업수익), 대손비용, 자기자본비율로 보여줍니다.",
+    },
+    "insurance": {
+        "name": "보험",
+        "kpis": [("revenue", "매출"), ("premiums", "보험료 수익"), ("net_income", "순이익"), ("eps", "EPS")],
+        "pills": {"매출": "revenue", "보험료 수익": "premiums", "영업이익": "operating_income",
+                  "순이익": "net_income", "EPS": "eps", "배당(DPS)": "dps"},
+        "margins": {"operating_margin": "영업이익률", "net_margin": "순이익률"},
+        "growth": ["revenue", "premiums", "net_income", "eps"],
+        "summary": ["revenue", "premiums", "net_income"],
+        "note": "보험사는 유동비율·EBITDA 같은 지표가 맞지 않아 보험료 수익과 자기자본비율 위주로 보여줍니다.",
+    },
+    "reit": {
+        "name": "리츠",
+        "kpis": [("revenue", "매출"), ("ffo", "FFO(추정)"), ("net_income", "순이익"),
+                 ("ffo_per_share", "주당 FFO")],
+        "pills": {"매출": "revenue", "FFO(추정)": "ffo", "주당 FFO": "ffo_per_share", "순이익": "net_income",
+                  "배당(DPS)": "dps"},
+        "margins": {"net_margin": "순이익률"},
+        "growth": ["revenue", "ffo", "ffo_per_share", "dps"],
+        "summary": ["revenue", "ffo", "net_income"],
+        "note": "리츠는 감가상각이 커서 순이익보다 FFO(순이익 + 감가상각 + 손상 − 부동산 처분이익)로 봅니다. "
+                "FFO는 공시 태그가 없어 이 공식으로 추정한 값이라 회사 발표치와 조금 다를 수 있습니다.",
+    },
+}
+PER_SHARE_COLS = ("eps", "dps", "ffo_per_share")
 TABS = {"📈 재무": "fin", "💹 주가·가치": "val", "💰 배당": "div", "📄 공시": "filings", "👤 내부자": "ins"}
 
 
@@ -38,6 +87,7 @@ def render(ticker: str) -> None:
             snap = None
             st.warning(f"재무 데이터를 불러오지 못했습니다: {exc}")
 
+    business = business_kind(profile)
     _header(ticker, profile)
     annual = snap["annual"] if snap else pd.DataFrame()
     currency = snap["currency"] if snap else "USD"
@@ -55,7 +105,7 @@ def render(ticker: str) -> None:
         except Exception as exc:
             table = pd.DataFrame()
             st.warning(f"{basis} 데이터를 불러오지 못했습니다: {exc}")
-    _kpis(snap, table, period_key, currency)
+    _kpis(snap, table, period_key, currency, business)
 
     mode = theme_mode()
     # Stateful tabs: the open tab survives reruns, and only the open tab is rendered, so e.g.
@@ -69,9 +119,9 @@ def render(ticker: str) -> None:
         with tab:
             name = TABS[label]
             if name == "fin":
-                _financials(ticker, table, annual, period_key, currency, mode)
+                _financials(ticker, table, annual, period_key, currency, mode, business)
             elif name == "val":
-                _valuation(ticker, snap, annual, currency, mode)
+                _valuation(ticker, snap, annual, currency, mode, business)
             elif name == "div":
                 _dividends(ticker, snap, annual, currency, mode)
             elif name == "filings":
@@ -88,6 +138,9 @@ def _header(ticker: str, profile: dict) -> None:
         meta.append(", ".join(profile["exchanges"]))
     if profile.get("industry"):
         meta.append(profile["industry"])
+    kind = BUSINESS[business_kind(profile)]["name"]
+    if kind:
+        meta.append(kind)
     fye = profile.get("fiscal_year_end") or ""
     if len(fye) == 4:
         meta.append(f"회계연도 말 {int(fye[:2])}/{int(fye[2:])}")
@@ -98,7 +151,7 @@ def _header(ticker: str, profile: dict) -> None:
               on_click=watchlist.toggle, args=(ticker,), type="secondary")
 
 
-def _kpis(snap: dict | None, table: pd.DataFrame, period: str, currency: str) -> None:
+def _kpis(snap: dict | None, table: pd.DataFrame, period: str, currency: str, business: str) -> None:
     items = []
     if snap:
         q = snap["quote"]
@@ -114,74 +167,68 @@ def _kpis(snap: dict | None, table: pd.DataFrame, period: str, currency: str) ->
         tag = {"annual": table["label"].iloc[-1], "ttm": f"TTM {table['label'].iloc[-1]}",
                "quarterly": f"{table['label'].iloc[-1]}분기"}[period]
         note = BASIS_NOTE[period]
-        for col, name in (("revenue", "매출"), ("operating_income", "영업이익"),
-                          ("net_income", "순이익")):
+        for col, name in BUSINESS[business]["kpis"]:
             value, delta = yoy(table, col, period)
-            items.append((name, fmt.money(value, currency), delta, {"help": f"{tag} · {note}"}))
-        eps, eps_d = yoy(table, "eps", period)
-        items.append(("EPS", fmt.per_share(eps, currency), eps_d,
-                      {"help": f"희석 주당순이익 · {tag} · {note}"}))
+            shown = fmt.per_share(value, currency) if col in PER_SHARE_COLS else fmt.money(value, currency)
+            items.append((name, shown, delta, {"help": f"{tag} · {note}"}))
         st.markdown(f'<div class="ed-sub">실적: <b>{html.escape(tag)}</b> 기준 · 증감은 {note}</div>',
                     unsafe_allow_html=True)
+    stale = (snap or {}).get("stale_since")
+    if stale is not None:
+        st.warning(f"⚠️ SEC에 있는 최신 실적이 {pd.Timestamp(stale):%Y-%m} 결산이라 오래됐습니다. "
+                   "PER 등 주가 대비 지표는 지금 실적보다 과대·과소평가될 수 있습니다.")
+    fx = (snap or {}).get("fx")
+    if fx:
+        rate = f"1 {fx['from']} = {fx['rate']:.4g} {fx['to']}로 환산" if fx["rate"] else "환율을 받지 못해 밸류에이션 생략"
+        st.markdown(f'<div class="ed-sub">💱 재무제표는 {fx["from"]}, 주가는 {fx["to"]}(ADR) · '
+                    f'밸류에이션은 {html.escape(rate)}</div>', unsafe_allow_html=True)
     if items:
         kpi_grid(items, "top")
 
 
 # ---------------------------------------------------------------- 재무
 def _financials(ticker: str, table: pd.DataFrame, annual: pd.DataFrame, period_key: str,
-                currency: str, mode: str) -> None:
+                currency: str, mode: str, business: str) -> None:
     if table.empty:
-        st.info("이 회사는 XBRL 재무 데이터가 없습니다 (펀드, 신규 상장사, 일부 외국 기업 등).")
+        if period_key != "annual" and not annual.empty:
+            st.info("분기 재무 데이터가 없습니다. 외국 기업(20-F 제출)은 SEC에 연간 보고서만 XBRL로 제출해서 "
+                    "연간 기준으로만 볼 수 있습니다. 위에서 '연간'을 선택하세요.")
+        else:
+            st.info("이 회사는 XBRL 재무 데이터가 없습니다 (펀드, 신규 상장사 등).")
         return
     if period_key == "ttm":
         st.caption("TTM = 각 분기 시점의 최근 4분기 합계. 계절성 없이 추세를 볼 수 있습니다.")
 
-    choices = {"매출": "revenue", "영업이익": "operating_income", "EBITDA": "ebitda",
-               "순이익": "net_income", "EPS": "eps", "FCF": "fcf", "배당(DPS)": "dps",
-               "주식수": "shares_diluted"}
-    choices = {k: v for k, v in choices.items() if table[v].notna().any()}
+    cfg = BUSINESS[business]
+    if cfg.get("note"):
+        st.caption(f"🏷️ {cfg['name']} · {cfg['note']}")
+    choices = {k: v for k, v in cfg["pills"].items() if table[v].notna().any()}
     pick = st.pills("지표", list(choices), default=next(iter(choices)), key="metric_pick",
                     label_visibility="collapsed") or next(iter(choices))
     col = choices[pick]
     unit_note = "주" if col == "shares_diluted" else currency
-    st.markdown(f"**{_label(col)}** <span class='ed-meta'>({unit_note})</span>", unsafe_allow_html=True)
+    st.markdown(f"**{html.escape(pick)}** <span class='ed-meta'>({unit_note})</span>", unsafe_allow_html=True)
     plot(charts.bar_series(table.dropna(subset=[col]), col, mode,
-                           "" if col == "shares_diluted" else currency, per_share=(col in ("eps", "dps"))))
+                           "" if col == "shares_diluted" else currency, per_share=(col in PER_SHARE_COLS)))
     if col == "shares_diluted":
         st.caption("가중평균 희석주식수. 줄어들면 자사주 매입, 늘어나면 주식 발행·보상 효과입니다.")
 
-    st.markdown("**마진**")
-    plot(charts.margin_lines(table, {"gross_margin": "매출총이익률", "ebitda_margin": "EBITDA 마진",
-                                     "operating_margin": "영업이익률", "net_margin": "순이익률"}, mode))
+    margins = {k: v for k, v in cfg["margins"].items() if table[k].notna().any()}
+    if margins:
+        st.markdown("**마진**" if business != "bank" else "**효율성·이익률**")
+        plot(charts.margin_lines(table, margins, mode))
 
     if period_key != "quarterly" and table[["roe", "roic"]].notna().any().any():
         st.markdown("**자본 수익률**")
-        plot(charts.margin_lines(table, {"roe": "ROE", "roic": "ROIC", "roa": "ROA"}, mode))
+        # ROIC needs operating income and debt in the industrial sense: not for financials.
+        returns = {"roe": "ROE", "roa": "ROA"} if business != "general" else {"roe": "ROE", "roic": "ROIC", "roa": "ROA"}
+        plot(charts.margin_lines(table, returns, mode))
         st.caption("ROE = 순이익 ÷ 평균 자본. ROIC = 세후 영업이익 ÷ 평균 투하자본(자본 + 차입금 − 현금), "
                    "세율은 실효세율(없으면 21%). ROA = 순이익 ÷ 평균 총자산.")
 
-    _growth(table, period_key)
+    _growth(table, period_key, cfg["growth"])
 
-    latest = table.iloc[-1]
-    # ratios that need twelve months of flows: TTM has them at the latest quarter
-    yearly = latest if period_key != "quarterly" or annual.empty else annual.iloc[-1]
-
-    def times(x):
-        return f"{x:.1f}배" if x is not None and pd.notna(x) else "–"
-
-    st.markdown(f"**재무 안정성** <span class='ed-meta'>{latest['label']} 기준</span>", unsafe_allow_html=True)
-    kpi_grid([
-        ("현금성자산", fmt.money(latest["cash"], currency)),
-        ("순차입금", fmt.money(latest["net_debt"], currency), None,
-         {"help": "총차입금(단기+장기) − 현금. 음수면 순현금"}),
-        ("부채비율", fmt.pct(latest["debt_ratio"], 0), None, {"help": "총부채 ÷ 자본총계"}),
-        ("유동비율", fmt.pct(latest["current_ratio"], 0), None,
-         {"help": "유동자산 ÷ 유동부채. 100% 미만이면 1년 내 갚을 돈이 더 많음"}),
-        ("이자보상배율", times(yearly["interest_coverage"]), None,
-         {"help": f"영업이익 ÷ 이자비용 ({yearly['label']}). 높을수록 이자 부담이 작음"}),
-        ("순차입금/EBITDA", times(yearly.get("net_debt_ebitda")), None,
-         {"help": f"빚을 영업현금으로 몇 년에 갚는지 ({yearly['label']}). 3배 이상이면 부담"}),
-    ], "bs")
+    _stability(ticker, annual, currency, business)
 
     if period_key == "ttm":
         st.markdown("**전체 재무제표**")
@@ -191,22 +238,109 @@ def _financials(ticker: str, table: pd.DataFrame, annual: pd.DataFrame, period_k
 
     with st.expander("요약 표로 보기"):
         view = pd.DataFrame({"기간": table["label"]})
-        for c in ("revenue", "operating_income", "net_income", "fcf"):
-            view[_label(c)] = [fmt.money(v, currency) for v in table[c]]
-        view["영업이익률"] = [fmt.pct(v) for v in table["operating_margin"]]
+        names = {v: k for k, v in cfg["pills"].items()}
+        for c in cfg["summary"]:
+            view[names.get(c, _label(c))] = [fmt.money(v, currency) for v in table[c]]
+        if business == "general":
+            view["영업이익률"] = [fmt.pct(v) for v in table["operating_margin"]]
         view["EPS"] = [fmt.per_share(v, currency) for v in table["eps"]]
         if period_key != "quarterly":
             view["ROE"] = [fmt.pct(v) for v in table["roe"]]
-            view["ROIC"] = [fmt.pct(v) for v in table["roic"]]
+            if business == "general":
+                view["ROIC"] = [fmt.pct(v) for v in table["roic"]]
         st.dataframe(view.iloc[::-1], hide_index=True, width="stretch")
     st.caption("XBRL 원천 데이터 기준. 분기 4Q와 분기 현금흐름은 누적치 차감으로 계산했습니다.")
 
 
-def _growth(table: pd.DataFrame, period_key: str) -> None:
+def business_kind(profile: dict) -> str:
+    """'general' | 'bank' | 'insurance' | 'reit' from edgartools' business category."""
+    return {"Bank": "bank", "Insurance Company": "insurance", "REIT": "reit"}.get(
+        profile.get("business") or "", "general")
+
+
+def _times(x) -> str:
+    return f"{x:.1f}배" if x is not None and pd.notna(x) else "–"
+
+
+def _stability(ticker: str, annual: pd.DataFrame, currency: str, business: str) -> None:
+    """Balance-sheet health on the latest quarter (MRQ), flow-based ratios on TTM — the
+    convention most apps use — whatever basis is selected above."""
+    try:
+        mrq_table, _ = load_table(ticker, "quarterly", 12)
+        ttm_table, _ = load_table(ticker, "ttm", 12)
+    except Exception:
+        mrq_table = ttm_table = pd.DataFrame()
+    bs = mrq_table.iloc[-1] if not mrq_table.empty else (annual.iloc[-1] if not annual.empty else None)
+    fl = ttm_table.iloc[-1] if not ttm_table.empty else (annual.iloc[-1] if not annual.empty else None)
+    if bs is None:
+        return
+    bs_tag = f"{bs['label']} 분기말" if not mrq_table.empty else bs["label"]
+    fl_tag = f"TTM {fl['label']}" if not ttm_table.empty else fl["label"]
+    negative_equity = pd.notna(bs["equity"]) and bs["equity"] <= 0
+
+    def ratio_value(v, pct=True):
+        if negative_equity:
+            return "자본 마이너스"
+        return fmt.pct(v, 0) if pct else _times(v)
+
+    debt_note = "–"
+    if pd.notna(bs["debt"]):
+        debt_note = f"장기 {fmt.money(bs['debt_long'], currency)} + 단기 {fmt.money(bs['debt_short'], currency)}"
+    net = bs["net_debt"]
+    rows = [{"label": "현금성자산", "value": fmt.money(bs["cash"], currency)}]
+    if business != "bank":
+        rows += [
+            {"label": "총차입금", "value": fmt.money(bs["debt"], currency),
+             "note": f"이자 붙는 빚 · {debt_note}" + (" · 리스부채 별도" if pd.notna(bs["lease"]) else "")},
+            {"label": "순차입금" if not (pd.notna(net) and net < 0) else "순현금",
+             "value": fmt.money(abs(net), currency) if pd.notna(net) else "–",
+             "note": "총차입금 − 현금" if not (pd.notna(net) and net < 0) else "현금이 차입금보다 많음"},
+        ]
+    if business in ("bank", "insurance"):
+        rows += [
+            {"label": "자기자본비율", "value": fmt.pct(bs["equity_ratio"], 1),
+             "note": "자본 ÷ 총자산. 금융사는 부채비율 대신 이 비율로 봅니다"},
+        ]
+        if business == "bank" and pd.notna(bs.get("deposits")):
+            rows.append({"label": "예수금", "value": fmt.money(bs["deposits"], currency), "note": "고객 예금"})
+    else:
+        de_lease = bs["de_ratio_lease"]
+        rows += [
+            {"label": "부채비율", "value": ratio_value(bs["debt_ratio"]),
+             "note": "총부채 ÷ 자본 (한국식, 영업부채 포함)"},
+            {"label": "D/E", "value": ratio_value(bs["de_ratio"]),
+             "note": "차입금 ÷ 자본 (미국 앱의 Debt/Equity)"
+                     + (f" · 리스 포함 {fmt.pct(de_lease, 0)}" if pd.notna(de_lease) and not negative_equity else "")},
+        ]
+        if business == "reit":
+            rows.append({"label": "차입금/총자산", "value": fmt.pct(bs["debt"] / bs["assets"], 0)
+                         if pd.notna(bs["debt"]) and bs["assets"] else "–",
+                         "note": "리츠의 레버리지 지표 (보통 30~50%)"})
+        else:
+            rows += [
+                {"label": "유동비율", "value": fmt.pct(bs["current_ratio"], 0),
+                 "note": "유동자산 ÷ 유동부채 · 100% 미만이면 1년 내 갚을 돈이 더 많음"},
+                {"label": "이자보상배율", "value": _times(fl["interest_coverage"]),
+                 "note": f"영업이익 ÷ 이자비용 · {fl_tag}"},
+                {"label": "순차입금/EBITDA", "value": _times(fl.get("net_debt_ebitda"))
+                 if pd.notna(net) and net > 0 else ("순현금" if pd.notna(net) else "–"),
+                 "note": f"빚을 몇 년 치 영업현금으로 갚는지 · {fl_tag} · 3배 넘으면 부담"},
+            ]
+    st.markdown(f"**재무 안정성** <span class='ed-meta'>{html.escape(bs_tag)} 기준</span>",
+                unsafe_allow_html=True)
+    metric_rows(rows)
+    if negative_equity:
+        st.caption("자본이 마이너스입니다(자사주 매입·배당이 누적 이익보다 많은 경우 흔함). "
+                   "부채비율·D/E는 의미가 없어 표시하지 않습니다.")
+
+
+def _growth(table: pd.DataFrame, period_key: str, cols: list[str]) -> None:
     rpy = 1 if period_key == "annual" else 4  # rows per year
     first = "1년" if period_key == "annual" else "전년 동기"
     rows = []
-    for col in ("revenue", "operating_income", "net_income", "eps", "fcf"):
+    for col in cols:
+        if table[col].isna().all():
+            continue
         _, one = yoy(table, col, period_key)
         row = {"항목": _label(col), first: fmt.pct(one, signed=True)}
         if period_key != "quarterly":  # multi-year growth of single quarters is mostly noise
@@ -258,7 +392,8 @@ def _statements(ticker: str, period: str, currency: str) -> None:
 _RANGES = {"1년": 1, "3년": 3, "5년": 5, "10년": 10}
 
 
-def _valuation(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: str, mode: str) -> None:
+def _valuation(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: str, mode: str,
+               business: str = "general") -> None:
     prices = load_prices(ticker, "10y")
     if prices.empty:
         st.info("주가 차트를 불러오지 못했습니다 (Yahoo Finance·Stooq 모두 응답 없음, 또는 비상장·외국 종목). "
@@ -283,37 +418,55 @@ def _valuation(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: s
         return
     v, flows = snap["valuation"], snap["ttm"] or {}
     basis = flows.get("label", "")
-    st.markdown(f"**밸류에이션** <span class='ed-meta'>{html.escape(basis)} 기준</span>",
+    stale = " · ⚠️ 오래된 실적" if snap.get("stale_since") is not None else ""
+    st.markdown(f"**밸류에이션** <span class='ed-meta'>{html.escape(basis)} 기준{stale}</span>",
                 unsafe_allow_html=True)
 
     def mult(x):
         return f"{x:.1f}배" if x is not None and pd.notna(x) else "–"
 
-    kpi_grid([
-        ("PER", mult(v["per"]), None, {"help": "주가수익비율 = 시가총액 ÷ 순이익. 적자면 –"}),
-        ("PBR", mult(v["pbr"]), None, {"help": "주가순자산비율 = 시가총액 ÷ 자본총계"}),
-        ("PSR", mult(v["psr"]), None, {"help": "주가매출비율 = 시가총액 ÷ 매출"}),
-        ("P/FCF", mult(v["p_fcf"]), None, {"help": "시가총액 ÷ 잉여현금흐름"}),
-        ("EV/EBITDA", mult(v["ev_ebitda"]), None,
-         {"help": "기업가치 ÷ EBITDA(영업이익 + 감가상각비). 부채 수준이 다른 회사끼리 비교할 때 유용"}),
-        ("EV/EBIT", mult(v["ev_ebit"]), None, {"help": "기업가치 ÷ 영업이익"}),
-        ("EV/매출", mult(v["ev_sales"]), None, {"help": "기업가치 ÷ 매출"}),
-        ("PEG", f"{v['peg']:.2f}" if v["peg"] else "–", None,
-         {"help": "PER ÷ EPS 3년 연평균 성장률(%). 1 미만이면 성장 대비 싸다는 신호로 봄"}),
-    ], "val")
-    st.caption(f"기업가치(EV) = 시가총액 + 총차입금 − 현금 = {fmt.money(v['ev'], currency)}")
+    vcur = snap["fx"]["to"] if snap.get("fx") else currency  # multiples are in the trading currency
+    ev_note = f"EV(기업가치) = 시총 + 차입금 − 현금 = {fmt.money(v['ev'], vcur)}"
+    rows = {
+        "per": {"label": "PER", "value": mult(v["per"]), "note": "시가총액 ÷ 순이익 · 적자면 –"},
+        "pbr": {"label": "PBR", "value": mult(v["pbr"]), "note": "시가총액 ÷ 자본총계"},
+        "psr": {"label": "PSR", "value": mult(v["psr"]), "note": "시가총액 ÷ 매출"},
+        "p_fcf": {"label": "P/FCF", "value": mult(v["p_fcf"]), "note": "시가총액 ÷ 잉여현금흐름"},
+        "ev_ebitda": {"label": "EV/EBITDA", "value": mult(v["ev_ebitda"]),
+                      "note": "부채 수준이 다른 회사끼리 비교할 때 유용 · " + ev_note},
+        "ev_ebit": {"label": "EV/EBIT", "value": mult(v["ev_ebit"]), "note": "기업가치 ÷ 영업이익"},
+        "ev_sales": {"label": "EV/매출", "value": mult(v["ev_sales"]), "note": "기업가치 ÷ 매출"},
+        "peg": {"label": "PEG", "value": f"{v['peg']:.2f}" if v["peg"] else "–",
+                "note": "PER ÷ EPS 3년 연평균 성장률(%) · 1 미만이면 성장 대비 싸다고 봄"},
+        "p_ffo": {"label": "P/FFO", "value": mult(v["p_ffo"]),
+                  "note": "리츠의 PER · 시가총액 ÷ FFO(추정)"},
+        "ffo_payout": {"label": "FFO 대비 배당", "value": fmt.pct(v["ffo_payout"], 0),
+                       "note": "배당금 ÷ FFO · 리츠는 100% 가까이 나눠주는 게 보통, 넘으면 주의"},
+    }
+    order = {
+        "general": ["per", "ev_ebitda", "pbr", "psr", "p_fcf", "ev_ebit", "ev_sales", "peg"],
+        "bank": ["per", "pbr", "peg"],
+        "insurance": ["per", "pbr", "peg"],
+        "reit": ["p_ffo", "ffo_payout", "per", "pbr", "ev_sales"],
+    }[business]
+    metric_rows([rows[k] for k in order])
+    if business in ("bank", "insurance"):
+        st.caption("금융사는 매출·현금흐름·EV 기반 지표가 의미가 없어 PER·PBR 위주로 봅니다.")
 
-    st.markdown("**주당 지표**", unsafe_allow_html=True)
-    kpi_grid([
-        ("EPS", fmt.per_share(v["eps"], currency), v["eps_growth"],
-         {"help": "희석 주당순이익 (최근 4분기 합), 1년 전 같은 기간 대비"}),
-        ("BPS", fmt.per_share(v["bps"], currency), None, {"help": "주당순자산 = 자본총계 ÷ 주식수"}),
-        ("DPS", fmt.per_share(v["dps"], currency), None, {"help": "주당배당금 (최근 4분기)"}),
-        ("주식수", fmt.number(v["shares"]) + "주" if v["shares"] else "–", None,
-         {"help": "시가총액 ÷ 주가로 계산한 발행주식수"}),
-    ], "ps")
+    st.markdown("**주당 지표**")
+    eps_delta = fmt.pct(v["eps_growth"], 1, signed=True) + " (1년 전 대비)" if v["eps_growth"] is not None else None
+    metric_rows([
+        {"label": "EPS", "value": fmt.per_share(v["eps"], currency), "note": "희석 주당순이익 · 최근 4분기 합",
+         "delta": eps_delta, "tone": None if v["eps_growth"] is None else ("good" if v["eps_growth"] >= 0 else "bad")},
+        {"label": "BPS", "value": fmt.per_share(v["bps"], currency),
+         "note": "주당순자산 = 자본 ÷ 주식수" + (" · ADR은 주식 1주와 달라 계산하지 않음" if snap.get("fx") else "")},
+        {"label": "DPS", "value": fmt.per_share(v["dps"], currency), "note": "주당배당금 · 최근 4분기"},
+        {"label": "주식수", "value": fmt.number(v["shares"]) + "주" if v["shares"] else "–",
+         "note": "시가총액 ÷ 주가" if not snap.get("fx") else "ADR이라 계산하지 않음"},
+    ])
 
-    per = historical_per(annual, prices)
+    # Per-share history mixes ADR prices with ordinary-share EPS for foreign filers: skip.
+    per = historical_per(annual, prices) if not snap.get("fx") else pd.DataFrame()
     if not per.empty and per["per"].notna().sum() >= 2:
         st.markdown("**연도별 PER** <span class='ed-meta'>회계연도 말 주가 ÷ 희석 EPS</span>",
                     unsafe_allow_html=True)
@@ -337,6 +490,10 @@ def _no_market_cap(snap: dict | None) -> None:
 
 # ---------------------------------------------------------------- 배당
 def _dividends(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: str, mode: str) -> None:
+    # Yahoo's dividend history is in the trading currency (per ADR for foreign filers);
+    # SEC figures stay in the filing currency.
+    filing_currency = currency
+    currency = ((snap or {}).get("quote") or {}).get("currency") or currency
     with st.spinner("배당 내역 불러오는 중…"):
         payments, ok = load_dividends(ticker)
         prices = load_prices(ticker, "10y")
@@ -372,7 +529,7 @@ def _dividends(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: s
     elif ok:
         st.info("배당 기록이 없습니다. 배당을 지급하지 않는 회사입니다 (자사주 매입으로 환원하는 경우는 아래 참고).")
     else:
-        _dividends_from_sec(annual, currency, mode)
+        _dividends_from_sec(annual, filing_currency, mode)
 
     _shareholder_returns(snap)
 

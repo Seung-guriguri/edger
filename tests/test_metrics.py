@@ -231,3 +231,70 @@ def test_dividend_history_stopped_payer():
     pay = pd.Series([1.0, 1.0], index=pd.to_datetime(["2018-03-01", "2019-03-01"]))
     h = dividend_history(pay, None, today=pd.Timestamp("2025-07-01"))
     assert h["paid_streak"] == 0 and h["raise_streak"] == 0
+
+
+# --- debt tag patterns, each taken from a real 10-K/20-F balance sheet (values in $B)
+def _bs(**tags):
+    rows = [dict(concept="us-gaap:Revenues", unit="USD", period_type="duration", period_start="2025-01-01",
+                 period_end="2025-12-31", numeric_value=100.0, filing_date="2026-02-01", form_type="10-K")]
+    for concept, value in tags.items():
+        prefix = "ifrs-full" if concept.startswith("ifrs_") else "us-gaap"
+        rows.append(dict(concept=f"{prefix}:{concept.removeprefix('ifrs_')}", unit="USD", period_type="instant",
+                         period_start=None, period_end="2025-12-31", numeric_value=value,
+                         filing_date="2026-02-01", form_type="10-K"))
+    table, _ = build_table(pd.DataFrame(rows), "annual")
+    return table.iloc[-1]
+
+
+@pytest.mark.parametrize("name,tags,expected", [
+    ("AAPL: LongTermDebt incl. current + CP", dict(LongTermDebt=78.114, LongTermDebtNoncurrent=68.208,
+                                                     LongTermDebtCurrent=9.906, CommercialPaper=1.997), 80.111),
+    ("MCD: LongTermDebt excludes current", dict(LongTermDebt=39.973, LongTermDebtNoncurrent=39.973,
+                                                 LongTermDebtCurrent=0.725, CommercialPaper=0.798), 41.496),
+    ("KO: debt-and-lease tags + CP + other", dict(LongTermDebtAndCapitalLeaseObligations=42.119,
+                                                  LongTermDebtAndCapitalLeaseObligationsCurrent=1.822,
+                                                  CommercialPaper=1.495, OtherShortTermBorrowings=0.056), 45.492),
+    ("NVDA: noncurrent + DebtCurrent only", dict(LongTermDebtNoncurrent=7.469, DebtCurrent=0.999), 8.468),
+    ("O: REIT notes + loans + secured + CP", dict(NotesPayable=25.032, LoansPayable=1.702, SecuredDebt=0.038,
+                                                  CommercialPaper=0.517), 27.289),
+    ("JPM: debt incl. leases + short-term", dict(LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities=435.206,
+                                                 ShortTermBorrowings=64.776), 499.982),
+    ("TSM: IFRS bonds + bank borrowings", dict(ifrs_NoncurrentPortionOfNoncurrentBondsIssued=926.6,
+                                               ifrs_CurrentBondsIssuedAndCurrentPortionOfNoncurrentBondsIssued=57.1,
+                                               ifrs_LongtermBorrowings=31.8), 1015.5),
+])
+def test_debt_patterns(name, tags, expected):
+    row = _bs(**tags)
+    assert row["debt"] == pytest.approx(expected, abs=1e-3), name
+
+
+def test_negative_equity_ratios_are_not_numbers():
+    row = _bs(LongTermDebt=40.0, Liabilities=60.0, StockholdersEquity=-1.8, Assets=58.2)
+    assert pd.isna(row["debt_ratio"]) and pd.isna(row["de_ratio"])
+
+
+def test_lease_inclusive_de():
+    row = _bs(LongTermDebt=80.0, OperatingLeaseLiability=12.0, FinanceLeaseLiability=2.0, StockholdersEquity=100.0)
+    assert row["de_ratio"] == pytest.approx(0.8) and row["de_ratio_lease"] == pytest.approx(0.94)
+
+
+def test_foreign_filer_valuation_uses_fx(monkeypatch):
+    """TSM-style: financials in TWD, ADR priced in USD. Multiples must use converted values
+    and per-share figures that mix ADRs with ordinary shares must be left out."""
+    from edger import ui
+    annual = pd.DataFrame({"label": ["FY24"], "net_income": [1000.0], "revenue": [3000.0], "eps": [40.0],
+                           "equity": [4000.0], "debt": [1000.0], "cash": [2000.0]},
+                          index=pd.to_datetime(["2024-12-31"]))
+    for col in ui.TTM_FLOWS:
+        if col not in annual:
+            annual[col] = float("nan")
+    monkeypatch.setattr(ui, "load_table", lambda t, p, n: (annual if p == "annual" else pd.DataFrame(), "TWD"))
+    monkeypatch.setattr(ui, "load_quote", lambda t: {"price": 300.0, "market_cap": 900.0, "currency": "USD",
+                                                     "change": None, "source": "Yahoo Finance"})
+    monkeypatch.setattr(ui, "load_fx", lambda a, b: 0.03)  # 1 TWD = 0.03 USD
+    snap = ui.load_snapshot("TSM")
+    v = snap["valuation"]
+    assert v["per"] == pytest.approx(900 / (1000 * 0.03))   # 30x, not 0.9x
+    assert v["pbr"] == pytest.approx(900 / (4000 * 0.03))
+    assert v["bps"] is None and v["shares"] is None
+    assert snap["fx"]["rate"] == 0.03 and snap["stale_since"] is not None

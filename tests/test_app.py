@@ -15,20 +15,28 @@ def run(tab: str | None = None, **params) -> AppTest:
     return at
 
 
+def page_text(at: AppTest) -> str:
+    return "\n".join(m.value for m in at.markdown)
+
+
 def test_company_view_renders():
     at = run(t="DEMO")
     assert not at.error
     labels = [m.label for m in at.metric]
-    for expected in ("주가", "시가총액", "매출", "영업이익", "EPS", "순차입금"):
+    for expected in ("주가", "시가총액", "매출", "영업이익", "EPS"):
         assert any(label.startswith(expected) for label in labels), (expected, labels)
+    text = page_text(at)
+    for expected in ("재무 안정성", "분기말 기준", "총차입금", "부채비율", "D/E", "리스 포함", "유동비율", "이자보상배율"):
+        assert expected in text, expected
     assert len(at.tabs) == 5
 
 
 def test_valuation_tab():
     at = run(tab="💹 주가·가치", t="DEMO")
-    labels = [m.label for m in at.metric]
-    for expected in ("52주 최고", "PER", "PBR", "EV/EBITDA", "EV/EBIT", "PEG", "EPS", "BPS"):
-        assert expected in labels, (expected, labels)
+    assert "52주 최고" in [m.label for m in at.metric]
+    text = page_text(at)
+    for expected in ("PER", "PBR", "EV/EBITDA", "EV/EBIT", "PEG", "EPS", "BPS", "1년 전 대비"):
+        assert expected in text, expected
 
 
 def test_insider_tab():
@@ -44,8 +52,7 @@ def test_statements_never_blank():
             at.segmented_control(key="stmt_kind").set_value(kind).run()
             assert not at.exception
             assert not at.warning, (period, kind, [w.value for w in at.warning])
-    labels = [m.label for m in at.metric]
-    assert "이자보상배율" in labels and "유동비율" in labels
+    assert "이자보상배율" in page_text(at) and "유동비율" in page_text(at)
 
 
 def test_filing_reader():

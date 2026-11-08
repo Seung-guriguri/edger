@@ -125,6 +125,15 @@ def quote(ticker: str) -> dict:
         if out["price"]:
             out["source"] = "Yahoo Finance"
 
+    if out["market_cap"] is None:
+        # ADRs (e.g. TSM) have no share count in fast_info; the full quote has the market cap.
+        try:
+            import yfinance as yf
+
+            out["market_cap"] = _num((yf.Ticker(ticker).info or {}).get("marketCap"))
+        except Exception:
+            pass
+
     if not out["price"]:
         for name, history in (("Yahoo Finance", lambda: _yahoo_history(ticker, "5d")),
                               ("Stooq", lambda: _stooq_history(ticker))):
@@ -191,3 +200,11 @@ def dividends(ticker: str) -> tuple[pd.Series, bool]:
     s = s[s > 0].dropna()
     s.index = pd.DatetimeIndex(s.index).tz_localize(None).normalize()
     return s.sort_index().rename("dividend"), True
+
+
+def fx_rate(from_currency: str, to_currency: str) -> float | None:
+    """Units of ``to_currency`` per one ``from_currency`` (latest daily close), or None."""
+    if not from_currency or not to_currency or from_currency == to_currency:
+        return 1.0
+    s = _yahoo_history(f"{from_currency}{to_currency}=X", "5d")
+    return float(s.iloc[-1]) if not s.empty else None

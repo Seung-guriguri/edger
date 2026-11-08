@@ -102,19 +102,54 @@ METRICS: tuple[Metric, ...] = (
         "us-gaap:WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
         "ifrs-full:AdjustedWeightedAverageShares",
     ), unit="shares"),
-    Metric("debt_long", "장기차입금", "instant", (
-        "us-gaap:LongTermDebtNoncurrent",
+    # Borrowings are tagged in many incompatible ways (see _debt_columns). These components
+    # are combined there; none of them is shown on its own.
+    Metric("_ltd_total", "장기차입금 합계", "instant", (
         "us-gaap:LongTermDebt",
+        "us-gaap:LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities",
+        "us-gaap:LongTermDebtAndFinanceLeaseObligationsIncludingCurrentMaturities",
+        "ifrs-full:NoncurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings",
+    )),
+    Metric("_ltd_noncurrent", "장기차입금(비유동)", "instant", (
+        "us-gaap:LongTermDebtNoncurrent",
         "us-gaap:LongTermDebtAndCapitalLeaseObligations",
+        "us-gaap:LongTermDebtAndFinanceLeaseObligationsNoncurrent",
         "ifrs-full:NoncurrentPortionOfNoncurrentBorrowings",
         "ifrs-full:NoncurrentBorrowings",
     )),
-    Metric("debt_short", "단기차입금", "instant", (
-        "us-gaap:DebtCurrent",
+    Metric("_ltd_current", "유동성 장기차입금", "instant", (
         "us-gaap:LongTermDebtCurrent",
+        "us-gaap:LongTermDebtAndCapitalLeaseObligationsCurrent",
+        "us-gaap:LongTermDebtAndFinanceLeaseObligationsCurrent",
+        "ifrs-full:CurrentPortionOfNoncurrentBorrowings",
+    )),
+    Metric("_st_borrowings", "단기차입금", "instant", (
         "us-gaap:ShortTermBorrowings",
+        "ifrs-full:ShorttermBorrowings",
+    )),
+    Metric("_commercial_paper", "기업어음", "instant", ("us-gaap:CommercialPaper",)),
+    Metric("_other_st", "기타 단기차입금", "instant", ("us-gaap:OtherShortTermBorrowings",)),
+    Metric("_debt_current", "유동 차입금 합계", "instant", (
+        "us-gaap:DebtCurrent",
         "ifrs-full:CurrentBorrowings",
     )),
+    Metric("_notes_payable", "사채", "instant", ("us-gaap:NotesPayable", "us-gaap:SeniorNotes")),
+    Metric("_loans_payable", "대출", "instant", ("us-gaap:LoansPayable", "us-gaap:TermLoan")),
+    Metric("_secured_debt", "담보부 차입", "instant", ("us-gaap:SecuredDebt",)),
+    Metric("_unsecured_debt", "무담보 차입", "instant", ("us-gaap:UnsecuredDebt",)),
+    Metric("_credit_line", "신용한도 차입", "instant", ("us-gaap:LineOfCredit",)),
+    # IFRS filers (e.g. TSM) often report bonds separately from bank borrowings.
+    Metric("_bonds_noncurrent", "사채(비유동)", "instant", ("ifrs-full:NoncurrentPortionOfNoncurrentBondsIssued",)),
+    Metric("_bonds_current", "사채(유동)", "instant", (
+        "ifrs-full:CurrentBondsIssuedAndCurrentPortionOfNoncurrentBondsIssued",)),
+    Metric("_ifrs_lt_borrowings", "장기 차입금(IFRS)", "instant", ("ifrs-full:LongtermBorrowings",)),
+    Metric("_dep", "감가상각비", "flow", ("ifrs-full:DepreciationExpense",)),
+    Metric("_amort", "무형자산상각비", "flow", ("ifrs-full:AmortisationExpense",)),
+    Metric("_op_lease", "운용리스부채", "instant", (
+        "us-gaap:OperatingLeaseLiability",
+        "ifrs-full:LeaseLiabilities",
+    )),
+    Metric("_fin_lease", "금융리스부채", "instant", ("us-gaap:FinanceLeaseLiability",)),
     Metric("da", "감가상각비", "flow", (
         "us-gaap:DepreciationDepletionAndAmortization",
         "us-gaap:DepreciationAmortizationAndAccretionNet",
@@ -148,6 +183,37 @@ METRICS: tuple[Metric, ...] = (
         "us-gaap:CommonStockDividendsPerShareDeclared",
         "us-gaap:CommonStockDividendsPerShareCashPaid",
     ), unit="per_share"),
+    # --- banks
+    Metric("net_interest_income", "순이자이익", "flow", (
+        "us-gaap:InterestIncomeExpenseNet",
+        "us-gaap:InterestIncomeExpenseAfterProvisionForLoanLoss",
+        "ifrs-full:InterestRevenueExpense",
+    )),
+    Metric("noninterest_income", "비이자이익", "flow", ("us-gaap:NoninterestIncome",)),
+    Metric("noninterest_expense", "비이자비용", "flow", ("us-gaap:NoninterestExpense",)),
+    Metric("provision", "대손비용", "flow", (
+        "us-gaap:ProvisionForLoanLeaseAndOtherLosses",
+        "us-gaap:ProvisionForLoanAndLeaseLosses",
+        "us-gaap:ProvisionForCreditLossesNet",
+    )),
+    Metric("deposits", "예수금", "instant", ("us-gaap:Deposits",)),
+    # --- insurers
+    Metric("premiums", "보험료 수익", "flow", (
+        "us-gaap:PremiumsEarnedNet",
+        "us-gaap:PremiumsEarnedNetPropertyAndCasualty",
+        "us-gaap:PremiumsEarnedNetLife",
+    )),
+    # --- REITs (FFO = net income + depreciation + impairments - gains on property sales)
+    Metric("re_gain", "부동산 처분이익", "flow", (
+        "us-gaap:GainLossOnSaleOfProperties",
+        "us-gaap:GainsLossesOnSalesOfInvestmentRealEstate",
+        "us-gaap:GainLossOnSaleOfRealEstateInvestmentProperty",
+        "us-gaap:GainLossOnDispositionOfRealEstateDiscontinuedOperations",
+    )),
+    Metric("re_impairment", "부동산 손상", "flow", (
+        "us-gaap:ImpairmentOfRealEstate",
+        "us-gaap:ImpairmentOfLongLivedAssetsHeldForUse",
+    )),
     Metric("current_assets", "유동자산", "instant", (
         "us-gaap:AssetsCurrent",
         "ifrs-full:CurrentAssets",
@@ -173,6 +239,11 @@ DERIVED_LABELS = {
     "net_margin": "순이익률",
     "debt_ratio": "부채비율",
     "debt": "총차입금",
+    "debt_long": "장기차입금(유동성 포함)",
+    "debt_short": "단기차입금",
+    "lease": "리스부채",
+    "de_ratio": "D/E (차입금/자본)",
+    "de_ratio_lease": "D/E (리스 포함)",
     "net_debt": "순차입금",
     "fcf_margin": "FCF 마진",
     "roe": "ROE",
@@ -184,6 +255,10 @@ DERIVED_LABELS = {
     "interest_coverage": "이자보상배율",
     "net_debt_ebitda": "순차입금/EBITDA",
     "payout_ratio": "배당성향",
+    "equity_ratio": "자기자본비율",
+    "efficiency_ratio": "효율성 비율",
+    "ffo": "FFO(추정)",
+    "ffo_per_share": "주당 FFO(추정)",
 }
 
 _ANNUAL_DAYS = (330, 400)
@@ -371,6 +446,50 @@ def _ttm_table(quarterly: pd.DataFrame) -> pd.DataFrame:
     return q[q[["revenue", "net_income"]].notna().any(axis=1)]
 
 
+def _sum_known(*cols: pd.Series) -> pd.Series:
+    """Row-wise sum treating missing as 0, but NaN where every part is missing."""
+    frame = pd.concat(cols, axis=1)
+    return frame.sum(axis=1, min_count=1)
+
+
+def _debt_columns(table: pd.DataFrame) -> None:
+    """Total borrowings (debt_long + debt_short = debt) and lease liabilities.
+
+    Companies tag debt in incompatible ways, verified against 10-K balance sheets:
+      - AAPL: LongTermDebt (incl. current portion) + CommercialPaper
+      - MCD:  LongTermDebt tagged *without* the current portion, plus LongTermDebtCurrent
+      - KO:   LongTermDebtAndCapitalLeaseObligations(+Current) + CommercialPaper + Other
+      - NVDA: LongTermDebtNoncurrent + LongTermDebtCurrent (DebtCurrent = the same current part)
+      - O (REIT): NotesPayable + LoansPayable + SecuredDebt + CommercialPaper, no LongTermDebt
+    Long-term debt is therefore the larger of the "total" tag and noncurrent + current, and
+    DebtCurrent is only used when the current portion is not tagged separately.
+    """
+    t = table
+    parts = _sum_known(t["_ltd_noncurrent"], t["_ltd_current"]).where(t["_ltd_noncurrent"].notna())
+    ltd = pd.concat([t["_ltd_total"], parts], axis=1).max(axis=1)  # max ignores NaN
+    st = t["_st_borrowings"].combine_first(_sum_known(t["_commercial_paper"], t["_other_st"]))
+
+    # NVDA-style: noncurrent tagged, current only as DebtCurrent (which already includes
+    # short-term borrowings).
+    use_debt_current = t["_ltd_total"].isna() & t["_ltd_current"].isna() & t["_debt_current"].notna()
+    ltd = ltd.where(~use_debt_current, t["_ltd_noncurrent"])
+    st = st.where(~use_debt_current, t["_debt_current"])
+
+    # IFRS bonds + long-term bank borrowings, when the US-GAAP-style tags are absent.
+    ifrs = _sum_known(t["_bonds_noncurrent"], t["_bonds_current"], t["_ifrs_lt_borrowings"])
+    ltd = ltd.combine_first(ifrs)
+
+    # REIT-style: no long-term-debt tags at all.
+    other = _sum_known(t["_notes_payable"], t["_loans_payable"], t["_secured_debt"],
+                       t["_unsecured_debt"], t["_credit_line"])
+    ltd = ltd.combine_first(other)
+
+    t["debt_long"] = ltd
+    t["debt_short"] = st
+    t["debt"] = _sum_known(ltd, st)
+    t["lease"] = _sum_known(t["_op_lease"], t["_fin_lease"])
+
+
 def _add_derived(table: pd.DataFrame, period: Period) -> pd.DataFrame:
     """Margins, FCF, leverage and return ratios. ``table`` holds reported metrics."""
     rev = table["revenue"].where(table["revenue"] != 0)
@@ -384,9 +503,11 @@ def _add_derived(table: pd.DataFrame, period: Period) -> pd.DataFrame:
     eq = table["equity"].where(table["equity"] > 0)
     table["debt_ratio"] = table["liabilities"] / eq
     table["fcf_margin"] = table["fcf"] / rev
-    table["debt"] = table["debt_long"].fillna(0) + table["debt_short"].fillna(0)
-    table.loc[table["debt_long"].isna() & table["debt_short"].isna(), "debt"] = np.nan
+    _debt_columns(table)
+    table["da"] = table["da"].combine_first(_sum_known(table["_dep"], table["_amort"]))
     table["net_debt"] = table["debt"] - table["cash"].fillna(0)  # unknown when debt is untagged
+    table["de_ratio"] = table["debt"] / eq
+    table["de_ratio_lease"] = (table["debt"] + table["lease"].fillna(0)) / eq
     table["ebitda"] = table["operating_income"] + table["da"]  # NaN when D&A is not tagged
     table["ebitda_margin"] = table["ebitda"] / rev
     table["current_ratio"] = table["current_assets"] / table["current_liabilities"].where(
@@ -394,6 +515,12 @@ def _add_derived(table: pd.DataFrame, period: Period) -> pd.DataFrame:
     table["interest_coverage"] = table["operating_income"] / table["interest_expense"].where(
         table["interest_expense"] > 0)
     table["payout_ratio"] = table["dividends"] / table["net_income"].where(table["net_income"] > 0)
+    table["equity_ratio"] = table["equity"] / table["assets"].where(table["assets"] > 0)
+    table["efficiency_ratio"] = table["noninterest_expense"] / rev
+    # FFO (NAREIT-style estimate): only meaningful for REITs; needs net income and D&A.
+    table["ffo"] = (table["net_income"] + table["da"] + table["re_impairment"].fillna(0)
+                    - table["re_gain"].fillna(0))
+    table["ffo_per_share"] = table["ffo"] / table["shares_diluted"].where(table["shares_diluted"] > 0)
     if period in ("annual", "ttm"):
         # Twelve months of flows: returns use average capital over that year (one row back
         # for annual, four quarters back for TTM); the earliest rows fall back to period-end.
@@ -453,7 +580,8 @@ def cagr(table: pd.DataFrame, col: str, years: int, rows_per_year: int = 1) -> f
 
 
 TTM_FLOWS = ("revenue", "gross_profit", "operating_income", "net_income", "eps", "ocf", "capex", "fcf",
-             "da", "ebitda", "interest_expense", "dividends", "buybacks", "dps")
+             "da", "ebitda", "interest_expense", "dividends", "buybacks", "dps", "ffo",
+             "net_interest_income", "noninterest_expense", "provision", "premiums")
 
 
 def ttm(quarterly: pd.DataFrame, offset: int = 0) -> dict | None:
@@ -491,7 +619,8 @@ def latest_shares_outstanding(raw_facts: pd.DataFrame) -> float | None:
     return float(same["numeric_value"].drop_duplicates().sum())
 
 
-VALUATION_KEYS = ("per", "psr", "pbr", "p_fcf", "fcf_yield", "ev", "ev_ebit", "ev_ebitda", "ev_sales",
+VALUATION_KEYS = ("per", "psr", "pbr", "p_fcf", "p_ffo", "ffo_payout", "fcf_yield", "ev", "ev_ebit",
+                  "ev_ebitda", "ev_sales",
                   "peg", "eps", "eps_growth", "bps", "dps", "dividend_yield", "buyback_yield",
                   "shareholder_yield", "payout_ratio", "shares")
 
@@ -527,6 +656,9 @@ def valuation(market_cap: float | None, flows: dict | None, balance: pd.Series |
         out["ev_ebitda"] = ratio(out["ev"], flows.get("ebitda"))
         out["ev_sales"] = ratio(out["ev"], flows.get("revenue"))
     out["p_fcf"] = ratio(market_cap, flows.get("fcf"))
+    out["p_ffo"] = ratio(market_cap, flows.get("ffo"))
+    if flows.get("dividends") is not None:
+        out["ffo_payout"] = ratio(flows.get("dividends"), flows.get("ffo"))
 
     out["eps"] = flows.get("eps")
     if prev_flows and out["eps"] is not None:

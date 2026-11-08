@@ -1,0 +1,59 @@
+# 실데이터 검증 기록
+
+2026-11 기준, 실제 SEC EDGAR · Yahoo Finance 데이터로 앱 전체(5개 탭 × 연간/TTM/분기)를 렌더링해
+오류가 없는지, 주요 숫자가 10-K/20-F 원문과 맞는지 확인했습니다.
+
+## 대상
+
+| 티커 | 유형 | 확인 포인트 |
+|---|---|---|
+| AAPL | 일반 기업 | 손익 원문 일치, CP(기업어음) 포함 차입금 |
+| MSFT | 일반 기업 | 6월 결산 |
+| KO | 일반 기업 | 리스 포함 차입금 태그로 변경된 해 |
+| MCD | 일반 기업 | 자본 마이너스 |
+| NVDA | 일반 기업 | 1월 결산, DebtCurrent만 있는 패턴 |
+| JPM | 은행 | 순이자이익·효율성 비율·자기자본비율 |
+| MET | 보험 | 보험료 수익 |
+| O | 리츠 | FFO 추정, 차입금 태그 없음 |
+| TSM | 외국 기업(20-F, IFRS) | TWD 재무 vs USD ADR 주가 |
+
+## 원문 대조 (AAPL FY24 10-K)
+
+| 항목 | 10-K | Edger |
+|---|---|---|
+| 매출 | $391.0B | $391.0B |
+| 영업이익 | $123.2B | $123.2B |
+| 순이익 | $93.7B | $93.7B |
+| EPS(희석) | $6.08 | $6.08 |
+| 총부채 / 자본 | $308.0B / $57.0B | $308.0B / $57.0B |
+
+## 차입금 태그 패턴 (모두 일치하도록 수정, `tests/test_metrics.py::test_debt_patterns`)
+
+| 회사 | 태그 구성 | 총차입금 |
+|---|---|---|
+| AAPL | LongTermDebt(유동성 포함) + CommercialPaper | $80.1B |
+| MCD | LongTermDebt(유동성 **제외**) + LongTermDebtCurrent + CP | $41.5B |
+| KO | LongTermDebtAndCapitalLeaseObligations(+Current) + CP + 기타 단기 | $45.5B |
+| NVDA | LongTermDebtNoncurrent + DebtCurrent | $8.5B |
+| O | NotesPayable + LoansPayable + SecuredDebt + CP | $27.3B |
+| JPM | LongTermDebt…IncludingCurrentMaturities + ShortTermBorrowings | $500.0B |
+| TSM | IFRS 사채(비유동+유동) + 장기차입금 | TWD 1.02T |
+
+## 발견하고 고친 문제
+
+1. **총차입금 누락**: 태그를 하나만 골라서 CP·유동성 장기부채가 빠짐 → 구성요소 합산 방식으로 변경.
+2. **부채비율 정의 혼동**: 총부채/자본(한국식)과 D/E(차입금/자본, 미국 앱)를 분리해 표시, 리스 포함 D/E 추가.
+3. **기준 시점**: 재무 안정성은 상단 기준과 무관하게 최근 분기말(MRQ) + TTM으로 통일.
+4. **자본 마이너스(MCD)**: 비율 대신 "자본 마이너스"로 표시.
+5. **업종**: 은행·보험·리츠는 해당 업종 지표로 화면 전환 (`business_category`).
+6. **외국 기업 통화(TSM)**: TWD 재무와 USD 주가를 그대로 나눠 PER 1.7배로 나오던 문제 → 환율 환산.
+   ADR은 주식 1주와 달라 BPS·연도별 PER은 생략.
+7. **오래된 실적**: SEC XBRL이 FY24에서 멈춘 회사는 주가 대비 지표에 경고 표시.
+8. **전체 재무제표**: 실제로 10-K/10-Q 원문 XBRL에서 불러오는 것을 확인.
+
+## 알려진 한계
+
+- FFO는 공시 태그가 없어 추정치(순이익 + 감가상각 + 손상 − 처분이익). O 기준 주당 $4.27로 회사 발표치와 비슷.
+- Apple 등 일부 회사는 이자비용을 태그하지 않아 이자보상배율이 "–".
+- 외국 기업(20-F)은 분기 XBRL이 없어 연간만 표시.
+- Stooq(주가 예비 출처)는 이 검증 환경에서 접속이 막혀 실데이터로 확인하지 못함.

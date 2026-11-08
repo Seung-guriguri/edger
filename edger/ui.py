@@ -41,6 +41,16 @@ button[data-baseweb="tab"] {padding: 0.6rem 0.7rem; font-size: 0.95rem;}
 /* filing reader: keep headings inside the text from shouting on a phone */
 [data-testid="stExpander"] h1, [data-testid="stExpander"] h2 {font-size: 1.1rem !important;}
 [data-testid="stExpander"] h3, [data-testid="stExpander"] h4 {font-size: 1rem !important;}
+/* metric list: label (+ small definition) on the left, value on the right */
+.ed-rows {margin: 0.2rem 0 0.8rem;}
+.ed-r {display: flex; justify-content: space-between; align-items: center; gap: 0.75rem;
+       padding: 0.55rem 0.1rem; border-bottom: 1px solid rgba(128,128,128,0.16);}
+.ed-r:last-child {border-bottom: none;}
+.ed-rl {font-size: 0.92rem;}
+.ed-rn {color: #8a8984; font-size: 0.75rem; margin-top: 0.1rem; line-height: 1.3;}
+.ed-rv {font-size: 1rem; font-weight: 600; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums;}
+.ed-rd {font-size: 0.75rem; font-weight: 500; display: block;}
+.ed-good {color: #0ca30c;} .ed-bad {color: #d03b3b;} .ed-warn {color: #c98500;}
 /* hidden helper iframes (browser storage bridge) take no space */
 iframe[title="streamlit_js_eval.streamlit_js_eval"] {display: none;}
 .element-container:has(iframe[title="streamlit_js_eval.streamlit_js_eval"]) {display: none;}
@@ -166,6 +176,41 @@ def load_dividends(ticker: str) -> tuple[pd.Series, bool]:
         return pd.Series(dtype=float, name="dividend"), False
 
 
+@st.cache_data(ttl=PRICE_TTL, show_spinner=False)
+def _cached_fx(frm: str, to: str) -> float:
+    rate = market.fx_rate(frm, to)
+    if not rate:
+        raise _NoPrice(f"{frm}{to}")
+    return rate
+
+
+def load_fx(frm: str, to: str) -> float | None:
+    key = f"fx:{frm}{to}"
+    if _recently_failed(key):
+        return None
+    try:
+        return _cached_fx(frm, to)
+    except _NoPrice:
+        _mark_failed(key)
+        return None
+
+
+# Money amounts that must be converted when the filing currency differs from the trading
+# currency. Per-share figures are not: an ADR is not one ordinary share.
+_PER_SHARE_FLOWS = {"eps", "dps", "ffo_per_share"}
+
+
+def _converted(values: dict | pd.Series | None, rate: float, keys) -> dict | None:
+    if values is None:
+        return None
+    out = dict(values)
+    for k in keys:
+        v = out.get(k)
+        if v is not None and not (isinstance(v, float) and pd.isna(v)):
+            out[k] = v * rate
+    return out
+
+
 def retry_prices() -> None:
     """Forget failures so the next run asks the price sources again."""
     st.session_state.pop("_price_failures", None)
@@ -209,11 +254,33 @@ def load_snapshot(ticker: str) -> dict:
     balance_src = quarterly if not quarterly.empty else annual
     balance = balance_src.iloc[-1] if not balance_src.empty else None
 
-    market_cap, cap_source = market_cap_estimate(ticker, q, quarterly, annual)
-    val = valuation(market_cap, flows, balance, price=q.get("price"), prev_flows=prev_flows,
-                    eps_cagr=cagr(annual, "eps", 3))
+    quote_currency = q.get("currency") or "USD"
+    fx = None
+    if q.get("price") and quote_currency != currency:
+        # Foreign filer / ADR (e.g. TSM reports in TWD, trades in USD). Only Yahoo's market cap
+        # is trustworthy here: SEC share counts are ordinary shares, the price is per ADR.
+        market_cap = q.get("market_cap")
+        cap_source = "Yahoo Finance 시가총액" if market_cap else None
+        rate = load_fx(currency, quote_currency)
+        fx = {"from": currency, "to": quote_currency, "rate": rate}
+        if rate and market_cap:
+            money = [k for k in TTM_FLOWS if k not in _PER_SHARE_FLOWS]
+            val = valuation(market_cap, _converted(flows, rate, money), _converted(balance, rate,
+                            ["equity", "debt", "cash"]), price=None,
+                            prev_flows=_converted(prev_flows, rate, money), eps_cagr=cagr(annual, "eps", 3))
+        else:
+            val = valuation(None, None, None)
+    else:
+        market_cap, cap_source = market_cap_estimate(ticker, q, quarterly, annual)
+        val = valuation(market_cap, flows, balance, price=q.get("price"), prev_flows=prev_flows,
+                        eps_cagr=cagr(annual, "eps", 3))
     return {
         "quote": q, "market_cap": market_cap, "cap_source": cap_source, "currency": currency, "ttm": flows,
+        "fx": fx,
+        # Earnings older than ~15 months make price-based multiples misleading (e.g. a foreign
+        # filer whose latest XBRL annual report is two years old).
+        "stale_since": (flows or {}).get("end") if flows and flows.get("end") is not None
+        and (pd.Timestamp.today() - pd.Timestamp(flows["end"])).days > 450 else None,
         "balance": balance, "valuation": val,
         "annual": annual,
     }
@@ -258,6 +325,24 @@ def kpi_grid(items: list[tuple], key: str) -> None:
             for col, item in zip(cols, items[i:i + 2]):
                 args, kwargs = (item[:-1], item[-1]) if isinstance(item[-1], dict) else (item, {})
                 kpi(col, *args, **kwargs)
+
+
+def metric_rows(rows: list[dict]) -> None:
+    """Compact metric list for phones. Each row: label, value, and optional note (definition,
+    basis), delta (text under the value) and tone ('good' | 'bad' | 'warn') for the delta.
+
+    Tone always comes with words in the delta, never colour alone.
+    """
+    import html as _html
+
+    out = []
+    for r in rows:
+        note = f'<div class="ed-rn">{_html.escape(r["note"])}</div>' if r.get("note") else ""
+        tone = {"good": "ed-good", "bad": "ed-bad", "warn": "ed-warn"}.get(r.get("tone"), "ed-rn")
+        delta = f'<span class="ed-rd {tone}">{_html.escape(r["delta"])}</span>' if r.get("delta") else ""
+        out.append(f'<div class="ed-r"><div><div class="ed-rl">{_html.escape(r["label"])}</div>{note}</div>'
+                   f'<div class="ed-rv">{_html.escape(str(r["value"]))}{delta}</div></div>')
+    st.markdown(f'<div class="ed-rows">{"".join(out)}</div>', unsafe_allow_html=True)
 
 
 def safe_markdown_text(text: str) -> str:

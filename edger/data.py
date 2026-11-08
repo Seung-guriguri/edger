@@ -75,6 +75,9 @@ def fetch_profile(ticker: str) -> dict:
         "industry": _safe(lambda: c.industry, ""),
         "fiscal_year_end": _safe(lambda: c.fiscal_year_end, ""),
         "category": _safe(lambda: str(c.filer_category), ""),
+        # 'Operating Company', 'Bank', 'Insurance Company', 'REIT', 'BDC', ... (drives which
+        # metrics make sense on screen)
+        "business": _safe(lambda: str(c.business_category), "Operating Company"),
     }
 
 
@@ -225,7 +228,7 @@ def _statement_from_filing(ticker: str, kind: str, period: str) -> tuple[pd.Data
         raw = stmt.to_dataframe(view="summary", include_unit=True)
     except TypeError:  # older/newer signature
         raw = stmt.to_dataframe()
-    return normalize_xbrl_statement(raw), ("최근 10-K" if period == "annual" else "최근 10-Q") + " 공시 원문 XBRL"
+    return normalize_xbrl_statement(raw), ("최근 연간 보고서(10-K·20-F)" if period == "annual" else "최근 분기 보고서(10-Q)") + " 원문 XBRL"
 
 
 def _statement_from_facts(ticker: str, kind: str, period: str) -> tuple[pd.DataFrame, str]:
@@ -253,7 +256,7 @@ KEY_LINES = {
     "income": ["revenue", "gross_profit", "operating_income", "interest_expense", "pretax_income",
                "income_tax", "net_income", "eps", "shares_diluted"],
     "balance": ["cash", "current_assets", "assets", "current_liabilities", "debt_short", "debt_long",
-                "liabilities", "equity"],
+                "lease", "liabilities", "equity"],
     "cashflow": ["ocf", "da", "capex", "fcf", "dividends", "buybacks"],
 }
 
@@ -270,7 +273,7 @@ def _statement_from_key_lines(ticker: str, kind: str, period: str) -> tuple[pd.D
     for key in KEY_LINES[kind]:
         if key not in table or table[key].isna().all():
             continue
-        m = METRIC_BY_KEY.get(key)
+        m = METRIC_BY_KEY.get(key) if key not in DERIVED_LABELS else None
         rows.append({"label": DERIVED_LABELS.get(key) or m.label, "depth": 0, "is_abstract": False,
                      "kind": m.unit if m else "money",
                      **{lbl: v for lbl, v in zip(table["label"], table[key])}})
