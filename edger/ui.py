@@ -146,6 +146,26 @@ def load_quote(ticker: str) -> dict:
         return market.empty_quote()
 
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def _cached_dividends(ticker: str) -> pd.Series:
+    series, ok = market.dividends(ticker)
+    if not ok:
+        raise _NoPrice(ticker)
+    return series
+
+
+def load_dividends(ticker: str) -> tuple[pd.Series, bool]:
+    """(per-payment dividends, ok). ok=False means the source failed (not cached)."""
+    key = f"div:{ticker}"
+    if _recently_failed(key):
+        return pd.Series(dtype=float, name="dividend"), False
+    try:
+        return _cached_dividends(ticker), True
+    except _NoPrice:
+        _mark_failed(key)
+        return pd.Series(dtype=float, name="dividend"), False
+
+
 def retry_prices() -> None:
     """Forget failures so the next run asks the price sources again."""
     st.session_state.pop("_price_failures", None)

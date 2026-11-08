@@ -151,3 +151,43 @@ def _num(v) -> float | None:
     except (TypeError, ValueError):
         return None
     return None if np.isnan(v) or v == 0 else v
+
+
+# ---------------------------------------------------------------- dividends
+def _demo_dividends(ticker: str) -> pd.Series:
+    """Quarterly dividends since 2012, raised every year; DEMOB pays none (a growth stock)."""
+    if ticker.upper() == "DEMOB":
+        return pd.Series(dtype=float, name="dividend")
+    rng = np.random.default_rng(demo.COMPANIES[ticker.upper()][1] + 9)
+    dates = pd.date_range("2012-02-10", "2026-11-10", freq="QS-FEB") + pd.Timedelta(days=9)
+    dates = dates[dates <= pd.Timestamp("2026-11-07")]
+    amount, values, year = 0.20, [], None
+    for d in dates:
+        if year is not None and d.year != year:
+            amount *= 1 + max(0.0, rng.normal(0.08, 0.03))
+            if d.year == 2020:
+                amount /= 1 + 0.08  # a frozen year, so the "increase streak" resets
+        year = d.year
+        values.append(round(amount, 3))
+    return pd.Series(values, index=dates, name="dividend")
+
+
+def dividends(ticker: str) -> tuple[pd.Series, bool]:
+    """(per-payment dividends indexed by ex-date, ok). Split-adjusted.
+
+    ``ok`` is False when the source failed, so an empty Series can be told apart from a
+    company that simply pays no dividend.
+    """
+    if demo.is_demo(ticker):
+        return _demo_dividends(ticker), True
+    try:
+        import yfinance as yf
+
+        s = yf.Ticker(ticker).dividends
+    except Exception:
+        return pd.Series(dtype=float, name="dividend"), False
+    if s is None:
+        return pd.Series(dtype=float, name="dividend"), False
+    s = s[s > 0].dropna()
+    s.index = pd.DatetimeIndex(s.index).tz_localize(None).normalize()
+    return s.sort_index().rename("dividend"), True

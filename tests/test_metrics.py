@@ -206,3 +206,28 @@ def test_ttm_drops_windows_with_missing_quarter(facts):
     assert pd.Timestamp("2025-09-30") not in t.index
     assert pd.Timestamp("2025-12-31") not in t.index
     assert pd.Timestamp("2025-03-31") in t.index  # window before the gap is still fine
+
+
+def test_dividend_history_streaks_and_partial_year():
+    from edger.metrics import dividend_history
+    idx = pd.to_datetime(["2021-03-01", "2021-09-01", "2022-03-01", "2022-09-01",
+                          "2023-03-01", "2023-09-01", "2024-03-01", "2024-09-01", "2025-03-01"])
+    pay = pd.Series([1, 1, 1.1, 1.1, 1.1, 1.1, 1.2, 1.2, 1.3], index=idx, dtype=float)
+    prices = pd.Series([50.0, 55.0, 60.0, 65.0, 70.0],
+                       index=pd.to_datetime(["2021-12-31", "2022-12-30", "2023-12-29", "2024-12-31", "2025-06-30"]))
+    h = dividend_history(pay, prices, today=pd.Timestamp("2025-07-01"))
+    a = h["annual"]
+    assert a.loc[2025, "partial"] and not a.loc[2024, "partial"]
+    assert a.loc[2022, "dps"] == pytest.approx(2.2) and a.loc[2024, "growth"] == pytest.approx(2.4 / 2.2 - 1)
+    assert a.loc[2023, "yield"] == pytest.approx(2.2 / 60)
+    assert h["paid_streak"] == 4          # 2021-2024 complete years
+    assert h["raise_streak"] == 1         # 2023 was flat, 2024 raised
+    assert h["per_year"] == 2
+    assert h["ttm_dps"] == pytest.approx(1.2 + 1.3)  # payments after 2024-07-01
+
+
+def test_dividend_history_stopped_payer():
+    from edger.metrics import dividend_history
+    pay = pd.Series([1.0, 1.0], index=pd.to_datetime(["2018-03-01", "2019-03-01"]))
+    h = dividend_history(pay, None, today=pd.Timestamp("2025-07-01"))
+    assert h["paid_streak"] == 0 and h["raise_streak"] == 0

@@ -566,3 +566,73 @@ def historical_per(annual: pd.DataFrame, prices: pd.Series) -> pd.DataFrame:
         per = price / eps if eps is not None and pd.notna(eps) and eps > 0 else None
         rows.append({"label": row["label"], "price": price, "eps": eps, "per": per})
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------- dividend history
+def dividend_history(payments: pd.Series, prices: pd.Series | None = None,
+                     today: pd.Timestamp | None = None) -> dict:
+    """Summarise per-payment dividends (indexed by ex-date).
+
+    Returns {"annual": DataFrame, "payments": Series, ...stats}. ``annual`` has one row per
+    calendar year: dps (sum of payments), count, growth vs previous year, yield (dps ÷
+    year-end price, or latest price for the running year) and ``partial`` for the running
+    year, which is excluded from growth and streak statistics.
+    """
+    today = pd.Timestamp(today or pd.Timestamp.today()).normalize()
+    if payments is None or payments.empty:
+        return {"annual": pd.DataFrame(), "payments": pd.Series(dtype=float)}
+    payments = payments.sort_index()
+    by_year = payments.groupby(payments.index.year)
+    annual = pd.DataFrame({"dps": by_year.sum(), "count": by_year.size()})
+    annual.index.name = "year"
+    annual["partial"] = annual.index == today.year
+
+    full = annual[~annual["partial"]]
+    annual["growth"] = full["dps"].pct_change()
+    if prices is not None and not prices.empty:
+        year_end = prices.groupby(prices.index.year).last()
+        annual["yield"] = annual["dps"] / year_end.reindex(annual.index)
+        if annual["partial"].any():  # running year: trailing-12-month payments ÷ latest price
+            ttm_dps = payments[payments.index > today - pd.DateOffset(years=1)].sum()
+            annual.loc[annual["partial"], "yield"] = ttm_dps / float(prices.iloc[-1])
+    else:
+        annual["yield"] = np.nan
+
+    # Streaks count back from the last complete year, without gaps in the calendar.
+    years = list(full.index)
+    paid_streak = 0
+    for i in range(len(years) - 1, -1, -1):
+        if i < len(years) - 1 and years[i] != years[i + 1] - 1:
+            break
+        paid_streak += 1
+    raise_streak = 0
+    for i in range(len(years) - 1, 0, -1):
+        if years[i] - 1 != years[i - 1] or full["dps"].iloc[i] <= full["dps"].iloc[i - 1] * 1.0001:
+            break
+        raise_streak += 1
+    if not years or years[-1] < today.year - 1:  # stopped paying: no current streak
+        paid_streak = raise_streak = 0
+
+    recent_full = full.tail(3)
+    per_year = int(round(recent_full["count"].median())) if len(recent_full) else None
+    ttm = float(payments[payments.index > today - pd.DateOffset(years=1)].sum())
+
+    def growth_rate(years_back: int):
+        if len(full) <= years_back:
+            return None
+        start, end = float(full["dps"].iloc[-1 - years_back]), float(full["dps"].iloc[-1])
+        return (end / start) ** (1 / years_back) - 1 if start > 0 and end > 0 else None
+
+    return {
+        "annual": annual,
+        "payments": payments,
+        "last_date": payments.index[-1],
+        "last_amount": float(payments.iloc[-1]),
+        "ttm_dps": ttm,
+        "per_year": per_year,
+        "paid_streak": paid_streak,
+        "raise_streak": raise_streak,
+        "cagr5": growth_rate(5),
+        "cagr10": growth_rate(10),
+        "first_year": int(annual.index[0]),
+    }

@@ -163,3 +163,54 @@ def compare_lines(series: dict[str, pd.Series], mode: str, *, percent: bool, cur
         fig.update_yaxes(ticksuffix=suffix, tickprefix="$" if currency == "USD" else "")
     fig.update_layout(hovermode="x unified")
     return fig
+
+
+def dividend_bars(annual: pd.DataFrame, mode: str, currency: str = "USD") -> go.Figure:
+    """Dividends per share by calendar year; the running year is drawn faded."""
+    p = PALETTE[mode]
+    sym = "$" if currency == "USD" else ""
+    data = annual.tail(15)
+    colors = [p["series"][0] for _ in range(len(data))]
+    opac = [0.4 if part else 1.0 for part in data["partial"]]
+    text = []
+    for year, r in data.iterrows():
+        g = "" if pd.isna(r["growth"]) else f" ({r['growth'] * 100:+.1f}%)"
+        note = f" · 진행 중 {int(r['count'])}회" if r["partial"] else f" · {int(r['count'])}회"
+        text.append(f"{sym}{r['dps']:,.2f}{g}{note}")
+    fig = go.Figure(go.Bar(
+        x=[str(y) for y in data.index], y=data["dps"], marker=dict(color=colors, opacity=opac),
+        customdata=text, hovertemplate="%{x}<br><b>%{customdata}</b><extra></extra>",
+    ))
+    fig = _base(fig, mode, height=250)
+    fig.update_yaxes(tickprefix=sym)
+    return fig
+
+
+def dividend_payments(payments: pd.Series, mode: str, currency: str = "USD") -> go.Figure:
+    """Each payment as a bar on its ex-date (last ~10 years)."""
+    p = PALETTE[mode]
+    sym = "$" if currency == "USD" else ""
+    data = payments[payments.index >= payments.index[-1] - pd.DateOffset(years=10)]
+    fig = go.Figure(go.Bar(
+        x=data.index, y=data.values, marker_color=p["series"][0],
+        hovertemplate=f"%{{x|%Y-%m-%d}}<br><b>{sym}%{{y:,.3f}}</b><extra></extra>",
+    ))
+    fig = _base(fig, mode, height=230)
+    fig.update_xaxes(type="date", tickformat="%y", nticks=8)
+    fig.update_yaxes(tickprefix=sym)
+    fig.update_layout(bargap=0.2)
+    return fig
+
+
+def dividend_yield_line(annual: pd.DataFrame, mode: str) -> go.Figure:
+    p = PALETTE[mode]
+    data = annual.dropna(subset=["yield"]).tail(15)
+    fig = go.Figure(go.Scatter(
+        x=[str(y) + ("*" if part else "") for y, part in zip(data.index, data["partial"])],
+        y=data["yield"] * 100, mode="lines+markers",
+        line=dict(width=2, color=p["series"][0]), marker=dict(size=8, color=p["series"][0]),
+        hovertemplate="%{x} 배당수익률 <b>%{y:.2f}%</b><extra></extra>",
+    ))
+    fig = _base(fig, mode, height=210)
+    fig.update_yaxes(ticksuffix="%", rangemode="tozero")
+    return fig

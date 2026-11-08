@@ -7,15 +7,15 @@ import pandas as pd
 import streamlit as st
 
 from . import charts, data, fmt, watchlist
-from .metrics import DERIVED_LABELS, METRIC_BY_KEY, cagr, historical_per, yoy
-from .ui import (kpi_grid, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
+from .metrics import DERIVED_LABELS, METRIC_BY_KEY, cagr, dividend_history, historical_per, yoy
+from .ui import (kpi_grid, load_dividends, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
                  load_profile, load_snapshot, load_statement, load_table, plot,
                  safe_markdown_text, theme_mode)
 
 
 BASES = {"연간": "annual", "TTM": "ttm", "분기": "quarterly"}
 BASIS_NOTE = {"annual": "전년 대비", "ttm": "1년 전 TTM 대비", "quarterly": "전년 같은 분기 대비"}
-TABS = {"📈 재무": "fin", "💹 주가·가치": "val", "📄 공시": "filings", "👤 내부자": "ins"}
+TABS = {"📈 재무": "fin", "💹 주가·가치": "val", "💰 배당": "div", "📄 공시": "filings", "👤 내부자": "ins"}
 
 
 def _label(col: str) -> str:
@@ -72,6 +72,8 @@ def render(ticker: str) -> None:
                 _financials(ticker, table, annual, period_key, currency, mode)
             elif name == "val":
                 _valuation(ticker, snap, annual, currency, mode)
+            elif name == "div":
+                _dividends(ticker, snap, annual, currency, mode)
             elif name == "filings":
                 _filings(ticker)
             else:
@@ -311,15 +313,6 @@ def _valuation(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: s
          {"help": "시가총액 ÷ 주가로 계산한 발행주식수"}),
     ], "ps")
 
-    st.markdown("**주주환원**", unsafe_allow_html=True)
-    kpi_grid([
-        ("배당수익률", fmt.pct(v["dividend_yield"], 2), None, {"help": "배당금 지급액 ÷ 시가총액"}),
-        ("배당성향", fmt.pct(v["payout_ratio"], 0), None, {"help": "배당금 ÷ 순이익"}),
-        ("자사주 매입 수익률", fmt.pct(v["buyback_yield"], 2), None, {"help": "자사주 매입액 ÷ 시가총액"}),
-        ("총 주주수익률", fmt.pct(v["shareholder_yield"], 2), None,
-         {"help": "배당 + 자사주 매입을 합한 주주환원율"}),
-    ], "sh")
-
     per = historical_per(annual, prices)
     if not per.empty and per["per"].notna().sum() >= 2:
         st.markdown("**연도별 PER** <span class='ed-meta'>회계연도 말 주가 ÷ 희석 EPS</span>",
@@ -340,6 +333,99 @@ def _no_market_cap(snap: dict | None) -> None:
                   "무료 서버는 여러 앱이 같은 IP를 써서 Yahoo가 잠시 막는 경우가 많습니다.")
     st.info(f"시가총액을 계산할 수 없어 밸류에이션 지표를 표시하지 않습니다. {reason}")
     st.button("🔄 주가 다시 불러오기", key="retry_prices", on_click=retry_prices, width="stretch")
+
+
+# ---------------------------------------------------------------- 배당
+def _dividends(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: str, mode: str) -> None:
+    with st.spinner("배당 내역 불러오는 중…"):
+        payments, ok = load_dividends(ticker)
+        prices = load_prices(ticker, "10y")
+    hist = dividend_history(payments, prices)
+    yearly = hist["annual"]
+
+    if not yearly.empty:
+        _dividend_cards(hist, currency)
+        view = st.segmented_control("배당 보기", ["연도별", "회차별"], default="연도별", key="div_view",
+                                    label_visibility="collapsed") or "연도별"
+        if view == "연도별":
+            st.markdown("**연도별 주당배당금** <span class='ed-meta'>흐린 막대 = 올해(진행 중)</span>",
+                        unsafe_allow_html=True)
+            plot(charts.dividend_bars(yearly, mode, currency))
+        else:
+            st.markdown("**회차별 배당** <span class='ed-meta'>배당락일 기준, 최근 10년</span>",
+                        unsafe_allow_html=True)
+            plot(charts.dividend_payments(hist["payments"], mode, currency))
+        if yearly["yield"].notna().sum() >= 2:
+            st.markdown("**연도별 배당수익률** <span class='ed-meta'>연간 배당 ÷ 연말 주가, * = 최근 12개월</span>",
+                        unsafe_allow_html=True)
+            plot(charts.dividend_yield_line(yearly, mode))
+        with st.expander("표로 보기"):
+            table = pd.DataFrame({
+                "연도": [f"{y}{' (진행 중)' if part else ''}" for y, part in zip(yearly.index, yearly["partial"])],
+                "주당배당금": [fmt.per_share(v, currency) for v in yearly["dps"]],
+                "증가율": [fmt.pct(v, signed=True) for v in yearly["growth"]],
+                "횟수": yearly["count"].astype(int).values,
+                "배당수익률": [fmt.pct(v, 2) for v in yearly["yield"]],
+            }).iloc[::-1]
+            st.dataframe(table, hide_index=True, width="stretch")
+        st.caption("출처: Yahoo Finance 배당 내역 (액면분할 반영). 연도는 배당락일 기준 달력 연도입니다.")
+    elif ok:
+        st.info("배당 기록이 없습니다. 배당을 지급하지 않는 회사입니다 (자사주 매입으로 환원하는 경우는 아래 참고).")
+    else:
+        _dividends_from_sec(annual, currency, mode)
+
+    _shareholder_returns(snap)
+
+
+def _dividend_cards(hist: dict, currency: str) -> None:
+    yearly = hist["annual"]
+    last_yield = yearly["yield"].dropna()
+
+    def years(n):
+        return f"{n}년" if n else "–"
+
+    kpi_grid([
+        ("최근 12개월 배당", fmt.per_share(hist["ttm_dps"], currency),
+         f"수익률 {last_yield.iloc[-1] * 100:.2f}%" if len(last_yield) else None,
+         {"neutral": True, "help": "최근 1년간 지급된 주당배당금 합계와 현재 주가 대비 수익률"}),
+        ("최근 배당", fmt.per_share(hist["last_amount"], currency), f"{hist['last_date']:%Y-%m-%d}",
+         {"neutral": True, "help": f"배당락일 기준 · 연 {hist['per_year']}회 지급" if hist["per_year"] else "배당락일 기준"}),
+        ("연속 배당", years(hist["paid_streak"]), None,
+         {"help": f"끊기지 않고 배당한 햇수 (데이터 시작 {hist['first_year']}년 이후만 셉니다)"}),
+        ("연속 증액", years(hist["raise_streak"]), None, {"help": "주당배당금을 전년보다 늘린 연속 햇수"}),
+        ("5년 배당 성장률", fmt.pct(hist["cagr5"], 1, signed=True), None, {"help": "주당배당금 5년 연평균 증가율"}),
+        ("10년 배당 성장률", fmt.pct(hist["cagr10"], 1, signed=True), None, {"help": "주당배당금 10년 연평균 증가율"}),
+    ], "div")
+
+
+def _dividends_from_sec(annual: pd.DataFrame, currency: str, mode: str) -> None:
+    """Yahoo failed: show the per-share dividends the company reported to the SEC."""
+    st.info("Yahoo Finance에서 배당 내역을 받지 못해 SEC 공시의 주당배당금으로 대신 보여줍니다.")
+    if annual.empty or annual["dps"].dropna().empty:
+        st.caption("SEC 공시에도 주당배당금 항목이 없습니다.")
+        st.button("🔄 다시 불러오기", key="retry_div", on_click=retry_prices, width="stretch")
+        return
+    st.markdown("**회계연도별 주당배당금** <span class='ed-meta'>SEC 공시 기준</span>", unsafe_allow_html=True)
+    plot(charts.bar_series(annual.dropna(subset=["dps"]), "dps", mode, currency, per_share=True))
+    st.button("🔄 Yahoo에서 다시 불러오기", key="retry_div", on_click=retry_prices, width="stretch")
+
+
+def _shareholder_returns(snap: dict | None) -> None:
+    if not snap or not snap.get("market_cap"):
+        return
+    v = snap["valuation"]
+    st.markdown(f"**주주환원** <span class='ed-meta'>{html.escape((snap['ttm'] or {}).get('label', ''))} 기준</span>",
+                unsafe_allow_html=True)
+    flows = snap["ttm"] or {}
+    currency = snap.get("currency", "USD")
+    kpi_grid([
+        ("배당성향", fmt.pct(v["payout_ratio"], 0), None, {"help": "배당금 지급액 ÷ 순이익 (SEC 현금흐름표)"}),
+        ("자사주 매입액", fmt.money(flows.get("buybacks"), currency), None,
+         {"help": "자사주 매입에 쓴 현금 (SEC 현금흐름표)"}),
+        ("자사주 수익률", fmt.pct(v["buyback_yield"], 2), None, {"help": "자사주 매입액 ÷ 시가총액"}),
+        ("총 주주수익률", fmt.pct(v["shareholder_yield"], 2), None,
+         {"help": "(배당금 + 자사주 매입액) ÷ 시가총액. SEC 현금흐름표 기준이라 위 배당수익률과 약간 다를 수 있음"}),
+    ], "sh")
 
 
 # ---------------------------------------------------------------- 공시

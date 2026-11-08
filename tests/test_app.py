@@ -21,14 +21,13 @@ def test_company_view_renders():
     labels = [m.label for m in at.metric]
     for expected in ("주가", "시가총액", "매출", "영업이익", "EPS", "순차입금"):
         assert any(label.startswith(expected) for label in labels), (expected, labels)
-    assert len(at.tabs) == 4
+    assert len(at.tabs) == 5
 
 
 def test_valuation_tab():
     at = run(tab="💹 주가·가치", t="DEMO")
     labels = [m.label for m in at.metric]
-    for expected in ("52주 최고", "PER", "PBR", "EV/EBITDA", "EV/EBIT", "PEG", "EPS", "BPS", "배당수익률",
-                     "총 주주수익률"):
+    for expected in ("52주 최고", "PER", "PBR", "EV/EBITDA", "EV/EBIT", "PEG", "EPS", "BPS"):
         assert expected in labels, (expected, labels)
 
 
@@ -108,3 +107,19 @@ def test_basis_survives_tab_switch():
     at.run()
     assert at.segmented_control(key="period").value == "TTM"
     assert any("TTM 25.12" in md.value for md in at.markdown)
+
+
+def test_dividend_tab():
+    at = run(tab="💰 배당", t="DEMO")
+    assert not at.error
+    labels = [m.label for m in at.metric]
+    for expected in ("최근 12개월 배당", "최근 배당", "연속 배당", "연속 증액", "5년 배당 성장률", "배당성향",
+                     "자사주 매입액", "총 주주수익률"):
+        assert expected in labels, (expected, labels)
+    at.segmented_control(key="div_view").set_value("회차별").run()
+    assert not at.exception
+
+
+def test_dividend_tab_non_payer():
+    at = run(tab="💰 배당", t="DEMOB")
+    assert any("배당 기록이 없습니다" in i.value for i in at.info)
