@@ -19,13 +19,30 @@ def page_text(at: AppTest) -> str:
     return "\n".join(m.value for m in at.markdown)
 
 
+def kpi_value(at: AppTest, label: str) -> str:
+    import re
+    m = re.search(rf'<div class="ed-kl">{re.escape(label)}</div><div class="ed-kv">([^<]+)</div>', page_text(at))
+    assert m, label
+    return m.group(1)
+
+
+def test_signals():
+    at = run(t="DEMO")
+    text = page_text(at)
+    assert "한눈에 보기" in text
+    for label in ("밸류에이션", "성장", "수익성", "재무 안정성"):
+        assert label in text, label
+
+
 def test_company_view_renders():
     at = run(t="DEMO")
     assert not at.error
     labels = [m.label for m in at.metric]
-    for expected in ("주가", "시가총액", "매출", "영업이익", "EPS"):
-        assert any(label.startswith(expected) for label in labels), (expected, labels)
     text = page_text(at)
+    for kpi in ("매출", "영업이익", "순이익", "EPS", "ed-kgrid"):
+        assert kpi in text, kpi
+    for expected in ("ed-hp", "시총", "PER", "결산"):  # price, market cap and PER live in the header
+        assert expected in text, expected
     for expected in ("재무 안정성", "분기말 기준", "총차입금", "부채비율", "D/E", "리스 포함", "유동비율", "이자보상배율"):
         assert expected in text, expected
     assert len(at.tabs) == 5
@@ -33,15 +50,15 @@ def test_company_view_renders():
 
 def test_valuation_tab():
     at = run(tab="💹 주가·가치", t="DEMO")
-    assert "52주 최고" in [m.label for m in at.metric]
     text = page_text(at)
+    assert "52주 최고" in text
     for expected in ("PER", "PBR", "EV/EBITDA", "EV/EBIT", "PEG", "EPS", "BPS", "1년 전 대비"):
         assert expected in text, expected
 
 
 def test_insider_tab():
     at = run(tab="👤 내부자", t="DEMO")
-    assert "장내 매수" in [m.label for m in at.metric]
+    assert "장내 매수" in page_text(at)
 
 
 def test_statements_never_blank():
@@ -99,12 +116,12 @@ def test_ttm_basis():
     assert not at.exception
     assert any("TTM 25.12" in md.value for md in at.markdown)
     # TTM at fiscal year end equals the fiscal year
-    ttm_rev = next(m.value for m in at.metric if m.label == "매출")
-    ttm_op = next(m.value for m in at.metric if m.label == "영업이익")
+    ttm_rev = kpi_value(at, "매출")
+    ttm_op = kpi_value(at, "영업이익")
     at.segmented_control(key="period").set_value("연간").run()
     assert any("FY25" in md.value for md in at.markdown)
-    assert next(m.value for m in at.metric if m.label == "매출") == ttm_rev
-    assert next(m.value for m in at.metric if m.label == "영업이익") == ttm_op
+    assert kpi_value(at, "매출") == ttm_rev
+    assert kpi_value(at, "영업이익") == ttm_op
 
 
 def test_basis_survives_tab_switch():
@@ -119,10 +136,10 @@ def test_basis_survives_tab_switch():
 def test_dividend_tab():
     at = run(tab="💰 배당", t="DEMO")
     assert not at.error
-    labels = [m.label for m in at.metric]
-    for expected in ("최근 12개월 배당", "최근 배당", "연속 배당", "연속 증액", "5년 배당 성장률", "배당성향",
+    text = page_text(at)
+    for expected in ("최근 12개월 배당", "최근 배당", "연속 배당", "연속 증액", "배당 성장률", "배당성향",
                      "자사주 매입액", "총 주주수익률"):
-        assert expected in labels, (expected, labels)
+        assert expected in text, expected
     at.segmented_control(key="div_view").set_value("회차별").run()
     assert not at.exception
 

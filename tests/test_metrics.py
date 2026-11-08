@@ -298,3 +298,40 @@ def test_foreign_filer_valuation_uses_fx(monkeypatch):
     assert v["pbr"] == pytest.approx(900 / (4000 * 0.03))
     assert v["bps"] is None and v["shares"] is None
     assert snap["fx"]["rate"] == 0.03 and snap["stale_since"] is not None
+
+
+
+def _pay(rows):
+    return pd.Series([v for _, v in rows], index=pd.to_datetime([d for d, _ in rows]), dtype=float)
+
+
+def test_raise_streak_ignores_payment_count_shifts():
+    """KO-like: one year gets 5 payments, the next 3; both are still raises."""
+    from edger.metrics import dividend_history
+    pay = _pay([("2021-03-01", 1.0), ("2021-06-01", 1.0), ("2021-09-01", 1.0), ("2021-12-01", 1.0),
+                ("2022-03-01", 1.1), ("2022-06-01", 1.1), ("2022-09-01", 1.1), ("2022-11-28", 1.1), ("2022-12-30", 1.1),
+                ("2023-06-01", 1.2), ("2023-09-01", 1.2), ("2023-12-01", 1.2)])
+    assert dividend_history(pay, None, today=pd.Timestamp("2024-07-01"))["raise_streak"] == 2
+
+
+def test_raise_streak_counts_raise_in_last_payment():
+    """MSFT 2009-like: the raise lands in the year's last payment only."""
+    from edger.metrics import dividend_history
+    pay = _pay([(f"2021-{m:02d}-01", 0.11) for m in (3, 6, 9)] + [("2021-12-01", 0.13)]
+               + [(f"2022-{m:02d}-01", 0.13) for m in (3, 6, 9, 12)])
+    assert dividend_history(pay, None, today=pd.Timestamp("2023-07-01"))["raise_streak"] == 1
+
+
+def test_raise_streak_ignores_stray_payment():
+    """KO 2001-like: a doubled data-error payment must not make the next year look like a cut."""
+    from edger.metrics import dividend_history
+    pay = _pay([("2021-03-01", 0.09), ("2021-06-01", 0.09), ("2021-09-01", 0.18), ("2021-09-05", 0.09),
+                ("2021-12-01", 0.09), *[(f"2022-{m:02d}-01", 0.10) for m in (3, 6, 9, 12)]])
+    assert dividend_history(pay, None, today=pd.Timestamp("2023-07-01"))["raise_streak"] == 1
+
+
+def test_raise_streak_resets_on_cut():
+    from edger.metrics import dividend_history
+    pay = _pay([*[(f"2021-{m:02d}-01", 0.52) for m in (3, 6, 9, 12)],
+                *[(f"2022-{m:02d}-01", 0.2775) for m in (3, 6, 9, 12)]])
+    assert dividend_history(pay, None, today=pd.Timestamp("2023-07-01"))["raise_streak"] == 0

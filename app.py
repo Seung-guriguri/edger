@@ -45,8 +45,8 @@ def on_view_change() -> None:
 
 
 # ---------------------------------------------------------------- header
-st.title("📊 Edger")
-st.markdown('<div class="ed-sub">SEC EDGAR 공시 · 재무 · 주가 · 내부자 거래</div>', unsafe_allow_html=True)
+st.markdown('<div class="ed-app">📊 <b>Edger</b> <span class="ed-meta">SEC 공시 · 재무 · 주가</span></div>',
+            unsafe_allow_html=True)
 
 view = st.query_params.get("v") or "company"
 if view not in VIEWS:

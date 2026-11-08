@@ -19,11 +19,8 @@ CSS = """
 header[data-testid="stHeader"] {height: 0; background: transparent;}
 h1 {font-size: 1.5rem !important; margin-bottom: 0 !important;}
 h3 {font-size: 1.2rem !important; padding-bottom: 0 !important;}
-/* KPI grid: keep two cards per row even on narrow phones (Streamlit stacks columns by default) */
-[class*="st-key-kpis"] [data-testid="stHorizontalBlock"] {flex-wrap: wrap; gap: 0.5rem;}
-[class*="st-key-kpis"] [data-testid="stColumn"] {min-width: calc(50% - 0.25rem) !important; flex: 1 1 calc(50% - 0.25rem) !important;}
 [data-testid="stMetric"] {padding: 0.55rem 0.7rem;}
-[data-testid="stMetricValue"] {font-size: 1.3rem;}
+[data-testid="stMetricValue"] {font-size: 1.2rem;}
 [data-testid="stMetricLabel"] p {font-size: 0.8rem;}
 /* Larger tap targets for tabs; let 4 tabs fit on a phone */
 button[data-baseweb="tab"] {padding: 0.6rem 0.7rem; font-size: 0.95rem;}
@@ -41,6 +38,22 @@ button[data-baseweb="tab"] {padding: 0.6rem 0.7rem; font-size: 0.95rem;}
 /* filing reader: keep headings inside the text from shouting on a phone */
 [data-testid="stExpander"] h1, [data-testid="stExpander"] h2 {font-size: 1.1rem !important;}
 [data-testid="stExpander"] h3, [data-testid="stExpander"] h4 {font-size: 1rem !important;}
+.ed-app {font-size: 1.05rem; margin-bottom: 0.4rem;}
+/* company header */
+.ed-hname {font-size: 1.2rem; font-weight: 700; line-height: 1.25;}
+.ed-hmeta {color: #8a8984; font-size: 0.8rem; margin-top: 0.1rem;}
+.ed-hprice {margin-top: 0.35rem; display: flex; align-items: baseline; gap: 0.5rem;}
+.ed-hp {font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums;}
+.ed-hc {font-size: 0.95rem; font-weight: 600;}
+.st-key-head [data-testid="stHorizontalBlock"] {flex-wrap: nowrap !important; gap: 0.25rem;}
+.st-key-head [data-testid="stColumn"] {min-width: 0 !important;}
+.st-key-head button {font-size: 1.5rem; padding: 0 0.25rem; min-height: 2.2rem;}
+/* compact KPI grid (2 x n) */
+.ed-kgrid {display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin: 0.3rem 0 0.9rem;}
+.ed-k {border: 1px solid rgba(128,128,128,0.25); border-radius: 0.6rem; padding: 0.5rem 0.7rem;}
+.ed-kl {color: #8a8984; font-size: 0.78rem;}
+.ed-kv {font-size: 1.2rem; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.3;}
+.ed-kd {font-size: 0.78rem; font-weight: 600;}
 /* metric list: label (+ small definition) on the left, value on the right */
 .ed-rows {margin: 0.2rem 0 0.8rem;}
 .ed-r {display: flex; justify-content: space-between; align-items: center; gap: 0.75rem;
@@ -306,25 +319,25 @@ def plot(fig) -> None:
     st.plotly_chart(fig, theme=None, config=charts.PLOTLY_CONFIG, width="stretch")
 
 
-def kpi(col, label: str, value: str, delta: float | str | None = None, *, pp: bool = False,
-        help: str | None = None, neutral: bool = False) -> None:
-    if delta is None or isinstance(delta, str):
-        d = delta
-    else:
-        d = f"{delta * 100:+.1f}%p" if pp else f"{delta * 100:+.1f}%"
-    col.metric(label, value, d, border=True, help=help,
-               delta_color="off" if neutral else "normal",
-               delta_arrow="off" if neutral else "auto")
+def kpi_cards(items: list[dict]) -> None:
+    """Compact 2-column cards: {label, value, delta (fraction or None), pp (bool)}.
 
+    The change is written out with an arrow and sign, so colour is never the only cue.
+    """
+    import html as _html
 
-def kpi_grid(items: list[tuple], key: str) -> None:
-    """Two cards per row. ``items`` are argument tuples for :func:`kpi` (without ``col``)."""
-    with st.container(key=f"kpis_{key}"):
-        for i in range(0, len(items), 2):
-            cols = st.columns(2)
-            for col, item in zip(cols, items[i:i + 2]):
-                args, kwargs = (item[:-1], item[-1]) if isinstance(item[-1], dict) else (item, {})
-                kpi(col, *args, **kwargs)
+    cells = []
+    for it in items:
+        d = it.get("delta")
+        if d is None or pd.isna(d):
+            delta = '<div class="ed-kd ed-rn">–</div>'
+        else:
+            cls, arrow = ("ed-good", "▲") if d >= 0 else ("ed-bad", "▼")
+            unit = "%p" if it.get("pp") else "%"
+            delta = f'<div class="ed-kd {cls}">{arrow} {abs(d) * 100:.1f}{unit}</div>'
+        cells.append(f'<div class="ed-k"><div class="ed-kl">{_html.escape(it["label"])}</div>'
+                     f'<div class="ed-kv">{_html.escape(it["value"])}</div>{delta}</div>')
+    st.markdown(f'<div class="ed-kgrid">{"".join(cells)}</div>', unsafe_allow_html=True)
 
 
 def metric_rows(rows: list[dict]) -> None:
@@ -340,8 +353,9 @@ def metric_rows(rows: list[dict]) -> None:
         note = f'<div class="ed-rn">{_html.escape(r["note"])}</div>' if r.get("note") else ""
         tone = {"good": "ed-good", "bad": "ed-bad", "warn": "ed-warn"}.get(r.get("tone"), "ed-rn")
         delta = f'<span class="ed-rd {tone}">{_html.escape(r["delta"])}</span>' if r.get("delta") else ""
+        vtone = {"good": " ed-good", "bad": " ed-bad", "warn": " ed-warn"}.get(r.get("value_tone"), "")
         out.append(f'<div class="ed-r"><div><div class="ed-rl">{_html.escape(r["label"])}</div>{note}</div>'
-                   f'<div class="ed-rv">{_html.escape(str(r["value"]))}{delta}</div></div>')
+                   f'<div class="ed-rv{vtone}">{_html.escape(str(r["value"]))}{delta}</div></div>')
     st.markdown(f'<div class="ed-rows">{"".join(out)}</div>', unsafe_allow_html=True)
 
 

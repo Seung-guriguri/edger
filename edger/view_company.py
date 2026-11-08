@@ -8,7 +8,7 @@ import streamlit as st
 
 from . import charts, data, fmt, watchlist
 from .metrics import DERIVED_LABELS, METRIC_BY_KEY, cagr, dividend_history, historical_per, yoy
-from .ui import (kpi_grid, metric_rows, load_dividends, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
+from .ui import (kpi_cards, metric_rows, load_dividends, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
                  load_profile, load_snapshot, load_statement, load_table, plot,
                  safe_markdown_text, theme_mode)
 
@@ -88,7 +88,7 @@ def render(ticker: str) -> None:
             st.warning(f"재무 데이터를 불러오지 못했습니다: {exc}")
 
     business = business_kind(profile)
-    _header(ticker, profile)
+    _header(ticker, profile, snap)
     annual = snap["annual"] if snap else pd.DataFrame()
     currency = snap["currency"] if snap else "USD"
 
@@ -106,6 +106,7 @@ def render(ticker: str) -> None:
             table = pd.DataFrame()
             st.warning(f"{basis} 데이터를 불러오지 못했습니다: {exc}")
     _kpis(snap, table, period_key, currency, business)
+    _signals(ticker, snap, table, annual, period_key, business)
 
     mode = theme_mode()
     # Stateful tabs: the open tab survives reruns, and only the open tab is rendered, so e.g.
@@ -132,37 +133,50 @@ def render(ticker: str) -> None:
 
 
 # ---------------------------------------------------------------- header & KPIs
-def _header(ticker: str, profile: dict) -> None:
-    meta = [" · ".join(profile.get("tickers") or [ticker])]
-    if profile.get("exchanges"):
-        meta.append(", ".join(profile["exchanges"]))
-    if profile.get("industry"):
-        meta.append(profile["industry"])
-    kind = BUSINESS[business_kind(profile)]["name"]
-    if kind:
-        meta.append(kind)
+def _header(ticker: str, profile: dict, snap: dict | None) -> None:
+    """Name, price and the star on one compact block (the star sits right of the name)."""
     fye = profile.get("fiscal_year_end") or ""
+    meta = [" · ".join((profile.get("tickers") or [ticker])[:2])]
+    if profile.get("exchanges"):
+        meta.append(profile["exchanges"][0])
+    kind = BUSINESS[business_kind(profile)]["name"]
+    meta.append(kind or (profile.get("industry") or ""))
     if len(fye) == 4:
-        meta.append(f"회계연도 말 {int(fye[:2])}/{int(fye[2:])}")
-    st.subheader(profile.get("name", ticker))
-    st.markdown(f'<div class="ed-sub">{html.escape(" · ".join(meta))}</div>', unsafe_allow_html=True)
-    starred = ticker in watchlist.load()
-    st.button("★ 관심종목에서 빼기" if starred else "☆ 관심종목에 추가", key="star",
-              on_click=watchlist.toggle, args=(ticker,), type="secondary")
+        meta.append(f"{int(fye[:2])}월 결산")
+
+    price_html = ""
+    q = (snap or {}).get("quote") or {}
+    if q.get("price"):
+        qcur = q.get("currency") or "USD"
+        chg = q.get("change")
+        chg_html = ""
+        if chg is not None:
+            cls, arrow = ("ed-good", "▲") if chg >= 0 else ("ed-bad", "▼")
+            chg_html = f'<span class="ed-hc {cls}">{arrow} {abs(chg) * 100:.2f}%</span>'
+        extra = []
+        if snap.get("market_cap"):
+            extra.append(f"시총 {fmt.money(snap['market_cap'], qcur)}")
+        per = (snap.get("valuation") or {}).get("per")
+        if per:
+            extra.append(f"PER {per:.1f}배")
+        if q.get("source"):
+            extra.append(q["source"])
+        price_html = (f'<div class="ed-hprice"><span class="ed-hp">{html.escape(fmt.per_share(q["price"], qcur))}</span>'
+                      f'{chg_html}</div><div class="ed-hmeta">{html.escape(" · ".join(extra))}</div>')
+
+    with st.container(key="head"):
+        left, right = st.columns([7, 1], vertical_alignment="top")
+        left.markdown(
+            f'<div class="ed-hname">{html.escape(profile.get("name", ticker))}</div>'
+            f'<div class="ed-hmeta">{html.escape(" · ".join(m for m in meta if m))}</div>{price_html}',
+            unsafe_allow_html=True)
+        starred = ticker in watchlist.load()
+        right.button("★" if starred else "☆", key="star", on_click=watchlist.toggle, args=(ticker,),
+                     type="tertiary", help="관심종목에서 빼기" if starred else "관심종목에 추가")
 
 
 def _kpis(snap: dict | None, table: pd.DataFrame, period: str, currency: str, business: str) -> None:
     items = []
-    if snap:
-        q = snap["quote"]
-        if q.get("price"):
-            items.append(("주가", fmt.per_share(q["price"], q.get("currency", "USD")), q.get("change"),
-                          {"help": f"전일 대비 · 출처: {q.get('source') or '–'}"}))
-        if snap.get("market_cap"):
-            per = snap["valuation"].get("per")
-            items.append(("시가총액", fmt.money(snap["market_cap"], q.get("currency", "USD")),
-                          f"PER {per:.1f}배" if per else None,
-                          {"neutral": True, "help": f"계산 방식: {snap.get('cap_source')} · PER은 최근 4분기 기준"}))
     if not table.empty:
         tag = {"annual": table["label"].iloc[-1], "ttm": f"TTM {table['label'].iloc[-1]}",
                "quarterly": f"{table['label'].iloc[-1]}분기"}[period]
@@ -170,8 +184,8 @@ def _kpis(snap: dict | None, table: pd.DataFrame, period: str, currency: str, bu
         for col, name in BUSINESS[business]["kpis"]:
             value, delta = yoy(table, col, period)
             shown = fmt.per_share(value, currency) if col in PER_SHARE_COLS else fmt.money(value, currency)
-            items.append((name, shown, delta, {"help": f"{tag} · {note}"}))
-        st.markdown(f'<div class="ed-sub">실적: <b>{html.escape(tag)}</b> 기준 · 증감은 {note}</div>',
+            items.append({"label": name, "value": shown, "delta": delta})
+        st.markdown(f'<div class="ed-sub" style="margin-top:0.6rem">실적 <b>{html.escape(tag)}</b> · 증감은 {note}</div>',
                     unsafe_allow_html=True)
     stale = (snap or {}).get("stale_since")
     if stale is not None:
@@ -183,7 +197,107 @@ def _kpis(snap: dict | None, table: pd.DataFrame, period: str, currency: str, bu
         st.markdown(f'<div class="ed-sub">💱 재무제표는 {fx["from"]}, 주가는 {fx["to"]}(ADR) · '
                     f'밸류에이션은 {html.escape(rate)}</div>', unsafe_allow_html=True)
     if items:
-        kpi_grid(items, "top")
+        kpi_cards(items)
+
+
+def _signals(ticker: str, snap: dict | None, table: pd.DataFrame, annual: pd.DataFrame,
+             period: str, business: str) -> None:
+    """Four one-line verdicts. Thresholds are rules of thumb, stated in each note, so the
+    verdict can be checked rather than trusted."""
+    rows = []
+    v = (snap or {}).get("valuation") or {}
+
+    # Valuation: current PER vs this company's own history (median at fiscal year ends).
+    if business == "reit":
+        p_ffo = v.get("p_ffo")
+        if p_ffo:
+            tone, word = ("good", "낮음") if p_ffo < 12 else ("warn", "높음") if p_ffo > 22 else (None, "보통")
+            rows.append({"label": "밸류에이션", "value": word, "value_tone": tone,
+                         "note": f"P/FFO {p_ffo:.1f}배 · 리츠는 보통 12~22배"})
+    elif v.get("per"):
+        per = v["per"]
+        hist = pd.DataFrame()
+        if not (snap or {}).get("fx") and not annual.empty:
+            prices = load_prices(ticker, "10y")
+            hist = historical_per(annual, prices) if not prices.empty else pd.DataFrame()
+        hist_per = hist["per"].dropna() if not hist.empty else pd.Series(dtype=float)
+        if len(hist_per) >= 3:
+            med = float(hist_per.median())
+            gap = per / med - 1
+            tone, word = ("warn", "비쌈") if gap > 0.2 else ("good", "쌈") if gap < -0.2 else (None, "보통")
+            rows.append({"label": "밸류에이션", "value": word, "value_tone": tone,
+                         "note": f"PER {per:.1f}배 · 과거 {len(hist_per)}년 중앙값 {med:.1f}배보다 "
+                                 f"{abs(gap) * 100:.0f}% {'높음' if gap >= 0 else '낮음'}"})
+        else:
+            rows.append({"label": "밸류에이션", "value": f"PER {per:.1f}배",
+                         "note": "과거 PER 기록이 부족해 비교하지 않음"})
+    elif snap and snap.get("market_cap") and ((snap.get("ttm") or {}).get("net_income") or 0) < 0:
+        rows.append({"label": "밸류에이션", "value": "적자", "value_tone": "warn", "note": "순이익이 마이너스라 PER 없음"})
+
+    # Growth: the selected basis, year over year.
+    growth_col = "ffo" if business == "reit" else "revenue"
+    _, g = yoy(table, growth_col, period) if not table.empty else (None, None)
+    if g is not None:
+        tone, word = ("good", "성장") if g >= 0.10 else ("bad", "역성장") if g < 0 else (None, "완만")
+        name = "FFO" if business == "reit" else ("순영업수익" if business == "bank" else "매출")
+        rows.append({"label": "성장", "value": word, "value_tone": tone,
+                     "note": f"{name} {g * 100:+.1f}% ({BASIS_NOTE[period]}) · 10% 이상이면 성장"})
+
+    # Profitability: margin direction for operating companies, ROE level for financials.
+    src = annual if not annual.empty else table
+    if business == "general" and not table.empty and table["operating_margin"].notna().sum() > 1:
+        lag = 1 if period == "annual" else 4
+        om = table["operating_margin"]
+        now, prev = om.iloc[-1], om.iloc[-1 - lag] if len(om) > lag else None
+        if pd.notna(now) and prev is not None and pd.notna(prev):
+            d = now - prev
+            tone, word = ("good", "개선") if d >= 0.01 else ("bad", "악화") if d <= -0.01 else (None, "유지")
+            rows.append({"label": "수익성", "value": word, "value_tone": tone,
+                         "note": f"영업이익률 {now * 100:.1f}% ({d * 100:+.1f}%p, {BASIS_NOTE[period]})"})
+    elif not src.empty and src["roe"].notna().any():
+        roe = float(src["roe"].dropna().iloc[-1])
+        tone, word = ("good", "높음") if roe >= 0.12 else ("warn", "낮음") if roe < 0.08 else (None, "보통")
+        rows.append({"label": "수익성", "value": word, "value_tone": tone,
+                     "note": f"ROE {roe * 100:.1f}% · 12% 이상 높음, 8% 미만 낮음"})
+
+    # Balance sheet, on the latest quarter / TTM like the stability section.
+    try:
+        q, _ = load_table(ticker, "quarterly", 12)
+        t, _ = load_table(ticker, "ttm", 12)
+    except Exception:
+        q = t = pd.DataFrame()
+    bs = q.iloc[-1] if not q.empty else (annual.iloc[-1] if not annual.empty else None)
+    fl = t.iloc[-1] if not t.empty else (annual.iloc[-1] if not annual.empty else None)
+    if bs is not None:
+        if pd.notna(bs["equity"]) and bs["equity"] <= 0:
+            rows.append({"label": "재무 안정성", "value": "자본 마이너스", "value_tone": "warn",
+                         "note": "자사주 매입 등으로 자본이 음수 · 차입금 규모를 직접 확인하세요"})
+        elif business in ("bank", "insurance"):
+            er = bs["equity_ratio"]
+            if pd.notna(er):
+                rows.append({"label": "재무 안정성", "value": f"자기자본 {er * 100:.1f}%",
+                             "note": "자본 ÷ 총자산 · 금융사는 업종 평균과 비교해서 봅니다"})
+        elif business == "reit":
+            if pd.notna(bs["debt"]) and bs["assets"]:
+                lev = bs["debt"] / bs["assets"]
+                tone, word = ("good", "양호") if lev < 0.40 else ("warn", "주의") if lev > 0.55 else (None, "보통")
+                rows.append({"label": "재무 안정성", "value": word, "value_tone": tone,
+                             "note": f"차입금/총자산 {lev * 100:.0f}% · 40% 미만 양호, 55% 초과 주의"})
+        else:
+            net = bs["net_debt"]
+            ratio = fl.get("net_debt_ebitda") if fl is not None else None
+            if pd.notna(net) and net <= 0:
+                rows.append({"label": "재무 안정성", "value": "순현금", "value_tone": "good",
+                             "note": f"현금이 차입금보다 {fmt.money(-net, (snap or {}).get('currency', 'USD'))} 많음"})
+            elif ratio is not None and pd.notna(ratio):
+                tone, word = ("good", "양호") if ratio < 1 else ("warn", "주의") if ratio > 3 else (None, "보통")
+                rows.append({"label": "재무 안정성", "value": word, "value_tone": tone,
+                             "note": f"순차입금/EBITDA {ratio:.1f}배 · 1배 미만 양호, 3배 초과 주의"})
+
+    if rows:
+        st.markdown("**한눈에 보기** <span class='ed-meta'>규칙 기반 참고용, 투자 판단 아님</span>",
+                    unsafe_allow_html=True)
+        metric_rows(rows)
 
 
 # ---------------------------------------------------------------- 재무
@@ -408,10 +522,10 @@ def _valuation(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: s
         plot(charts.price_line(shown, mode))
         year = prices[prices.index >= prices.index[-1] - pd.DateOffset(years=1)]
         hi, lo = float(year.max()), float(year.min())
-        kpi_grid([
-            ("52주 최고", fmt.per_share(hi), last / hi - 1, {"help": "현재가의 52주 최고가 대비"}),
-            ("52주 최저", fmt.per_share(lo), last / lo - 1, {"help": "현재가의 52주 최저가 대비"}),
-        ], "range")
+        metric_rows([
+            {"label": "52주 최고", "value": fmt.per_share(hi), "delta": f"현재가 {fmt.pct(last / hi - 1, 1, signed=True)}"},
+            {"label": "52주 최저", "value": fmt.per_share(lo), "delta": f"현재가 {fmt.pct(last / lo - 1, 1, signed=True)}"},
+        ])
 
     if not snap or not snap.get("market_cap"):
         _no_market_cap(snap)
@@ -541,18 +655,20 @@ def _dividend_cards(hist: dict, currency: str) -> None:
     def years(n):
         return f"{n}년" if n else "–"
 
-    kpi_grid([
-        ("최근 12개월 배당", fmt.per_share(hist["ttm_dps"], currency),
-         f"수익률 {last_yield.iloc[-1] * 100:.2f}%" if len(last_yield) else None,
-         {"neutral": True, "help": "최근 1년간 지급된 주당배당금 합계와 현재 주가 대비 수익률"}),
-        ("최근 배당", fmt.per_share(hist["last_amount"], currency), f"{hist['last_date']:%Y-%m-%d}",
-         {"neutral": True, "help": f"배당락일 기준 · 연 {hist['per_year']}회 지급" if hist["per_year"] else "배당락일 기준"}),
-        ("연속 배당", years(hist["paid_streak"]), None,
-         {"help": f"끊기지 않고 배당한 햇수 (데이터 시작 {hist['first_year']}년 이후만 셉니다)"}),
-        ("연속 증액", years(hist["raise_streak"]), None, {"help": "주당배당금을 전년보다 늘린 연속 햇수"}),
-        ("5년 배당 성장률", fmt.pct(hist["cagr5"], 1, signed=True), None, {"help": "주당배당금 5년 연평균 증가율"}),
-        ("10년 배당 성장률", fmt.pct(hist["cagr10"], 1, signed=True), None, {"help": "주당배당금 10년 연평균 증가율"}),
-    ], "div")
+    yld = f"수익률 {last_yield.iloc[-1] * 100:.2f}%" if len(last_yield) else None
+    freq = f" · 연 {hist['per_year']}회" if hist["per_year"] else ""
+    metric_rows([
+        {"label": "최근 12개월 배당", "value": fmt.per_share(hist["ttm_dps"], currency), "delta": yld,
+         "note": "최근 1년간 받은 주당배당금 합계 · 현재 주가 대비"},
+        {"label": "최근 배당", "value": fmt.per_share(hist["last_amount"], currency),
+         "delta": f"{hist['last_date']:%Y-%m-%d}", "note": f"배당락일 기준{freq}"},
+        {"label": "연속 배당", "value": years(hist["paid_streak"]),
+         "note": f"끊기지 않고 배당한 햇수 · 데이터 시작 {hist['first_year']}년부터 셈"},
+        {"label": "연속 증액", "value": years(hist["raise_streak"]),
+         "note": "1회 평균 배당금이 전년보다 늘어난 연속 햇수 · 특별배당·오류값은 제외"},
+        {"label": "배당 성장률", "value": f"5년 {fmt.pct(hist['cagr5'], 1, signed=True)}",
+         "delta": f"10년 {fmt.pct(hist['cagr10'], 1, signed=True)}", "note": "주당배당금 연평균 증가율"},
+    ])
 
 
 def _dividends_from_sec(annual: pd.DataFrame, currency: str, mode: str) -> None:
@@ -575,14 +691,14 @@ def _shareholder_returns(snap: dict | None) -> None:
                 unsafe_allow_html=True)
     flows = snap["ttm"] or {}
     currency = snap.get("currency", "USD")
-    kpi_grid([
-        ("배당성향", fmt.pct(v["payout_ratio"], 0), None, {"help": "배당금 지급액 ÷ 순이익 (SEC 현금흐름표)"}),
-        ("자사주 매입액", fmt.money(flows.get("buybacks"), currency), None,
-         {"help": "자사주 매입에 쓴 현금 (SEC 현금흐름표)"}),
-        ("자사주 수익률", fmt.pct(v["buyback_yield"], 2), None, {"help": "자사주 매입액 ÷ 시가총액"}),
-        ("총 주주수익률", fmt.pct(v["shareholder_yield"], 2), None,
-         {"help": "(배당금 + 자사주 매입액) ÷ 시가총액. SEC 현금흐름표 기준이라 위 배당수익률과 약간 다를 수 있음"}),
-    ], "sh")
+    metric_rows([
+        {"label": "배당성향", "value": fmt.pct(v["payout_ratio"], 0), "note": "배당금 지급액 ÷ 순이익 (SEC 현금흐름표)"},
+        {"label": "자사주 매입액", "value": fmt.money(flows.get("buybacks"), currency),
+         "note": "자사주 매입에 쓴 현금 (SEC 현금흐름표)"},
+        {"label": "자사주 수익률", "value": fmt.pct(v["buyback_yield"], 2), "note": "자사주 매입액 ÷ 시가총액"},
+        {"label": "총 주주수익률", "value": fmt.pct(v["shareholder_yield"], 2),
+         "note": "(배당 + 자사주 매입) ÷ 시가총액 · SEC 현금 기준이라 위 배당수익률과 약간 다를 수 있음"},
+    ])
 
 
 # ---------------------------------------------------------------- 공시
@@ -675,10 +791,12 @@ def _insiders(ticker: str, mode: str) -> None:
         return
     market = trades[trades["code"].isin(["P", "S"])]
     buy, sell = market[market["code"] == "P"], market[market["code"] == "S"]
-    kpi_grid([
-        ("장내 매수", fmt.money(buy["value"].sum()), f"{len(buy)}건", {"neutral": True}),
-        ("장내 매도", fmt.money(sell["value"].sum()), f"{len(sell)}건", {"neutral": True}),
-    ], "ins")
+    metric_rows([
+        {"label": "장내 매수", "value": fmt.money(buy["value"].sum()), "delta": f"{len(buy)}건",
+         "note": "임원·대주주가 시장에서 산 금액 (Form 4 코드 P)"},
+        {"label": "장내 매도", "value": fmt.money(sell["value"].sum()), "delta": f"{len(sell)}건",
+         "note": "시장에서 판 금액 (코드 S) · 보상으로 받은 주식 매도가 많아 매수보다 흔함"},
+    ])
     if not market.empty:
         st.markdown("**월별 장내 매매**")
         plot(charts.insider_monthly(market, mode))

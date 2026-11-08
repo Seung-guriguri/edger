@@ -737,9 +737,19 @@ def dividend_history(payments: pd.Series, prices: pd.Series | None = None,
         if i < len(years) - 1 and years[i] != years[i + 1] - 1:
             break
         paid_streak += 1
+    # Raises are judged on the average payment per year. The yearly sum (what dividend lists
+    # nominally use) is distorted when an ex-date slips across New Year and a year gets 3 or 5
+    # payments (KO showed 23 instead of 63 years); the median misses years where the raise
+    # landed in the last payment only (MSFT 2009, PG 1985). The mean handles both.
+    # Payments more than 40% away from the year's median are dropped first: specials and
+    # data errors in Yahoo's history (KO 2001 has a doubled payment, PG 2002 a stray 0.345,
+    # PG 1983 a halved one) would otherwise fake a cut the next year.
+    med = payments.groupby(payments.index.year).transform("median")
+    regular = payments[(payments / med - 1).abs() <= 0.4]
+    rate = regular.groupby(regular.index.year).mean().reindex(full.index)
     raise_streak = 0
     for i in range(len(years) - 1, 0, -1):
-        if years[i] - 1 != years[i - 1] or full["dps"].iloc[i] <= full["dps"].iloc[i - 1] * 1.0001:
+        if years[i] - 1 != years[i - 1] or rate.iloc[i] <= rate.iloc[i - 1] * 1.0001:
             break
         raise_streak += 1
     if not years or years[-1] < today.year - 1:  # stopped paying: no current streak

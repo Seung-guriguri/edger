@@ -83,9 +83,9 @@ def _table(snaps: dict) -> None:
             "주가": fmt.per_share(q.get("price")) if q.get("price") else "–",
             "일간": fmt.pct(q.get("change"), signed=True),
             "시총": fmt.money(s.get("market_cap")),
-            "PER": f"{v['per']:.1f}" if v.get("per") else "–",
+            "PER": (f"{v['per']:.1f}" + ("⚠" if s.get("stale_since") is not None else "")) if v.get("per") else "–",
             "EV/EBITDA": f"{v['ev_ebitda']:.1f}" if v.get("ev_ebitda") else "–",
-            "EPS": fmt.per_share(v.get("eps")),
+            "EPS": fmt.per_share(v.get("eps"), s.get("currency", "USD")),
             "매출↑": fmt.pct(growth, signed=True),
             "영업이익률": fmt.pct(om.iloc[-1]) if len(om) else "–",
             "ROE": fmt.pct(roe.iloc[-1]) if len(roe) else "–",
@@ -98,7 +98,8 @@ def _table(snaps: dict) -> None:
         _open_company(rows[sel[0]]["티커"])
         del st.session_state["wl_table"]  # otherwise coming back would jump straight away again
         st.rerun()
-    st.caption("매출↑ = 최근 회계연도 매출 증가율. PER·EV/EBITDA·EPS = 최근 4분기 기준.")
+    st.caption("매출↑ = 최근 회계연도 매출 증가율. PER·EV/EBITDA·EPS = 최근 4분기 기준. "
+               "⚠ = SEC 실적이 오래돼 PER이 부정확할 수 있음. EPS는 회사 보고 통화 기준.")
 
 
 def _compare(snaps: dict) -> None:
