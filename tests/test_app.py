@@ -19,7 +19,7 @@ def test_company_view_renders():
     at = run(t="DEMO")
     assert not at.error
     labels = [m.label for m in at.metric]
-    for expected in ("주가", "시가총액", "ROE", "순차입금"):
+    for expected in ("주가", "시가총액", "매출", "영업이익", "EPS", "순차입금"):
         assert any(label.startswith(expected) for label in labels), (expected, labels)
     assert len(at.tabs) == 4
 
@@ -39,7 +39,7 @@ def test_insider_tab():
 
 def test_statements_never_blank():
     at = run(t="DEMO")
-    for period in ("연간", "분기"):
+    for period in ("연간", "분기"):  # TTM has no filed statement: covered in test_ttm_basis
         at.segmented_control(key="period").set_value(period).run()
         for kind in ("손익계산서", "재무상태표", "현금흐름표"):
             at.segmented_control(key="stmt_kind").set_value(kind).run()
@@ -85,3 +85,26 @@ def test_compare_eps_and_table_columns():
     assert not at.exception
     cols = list(at.dataframe[0].value.columns)
     assert "EV/EBITDA" in cols and "EPS" in cols
+
+
+def test_ttm_basis():
+    at = run(t="DEMO")
+    at.segmented_control(key="period").set_value("TTM").run()
+    assert not at.exception
+    assert any("TTM 25.12" in md.value for md in at.markdown)
+    # TTM at fiscal year end equals the fiscal year
+    ttm_rev = next(m.value for m in at.metric if m.label == "매출")
+    ttm_op = next(m.value for m in at.metric if m.label == "영업이익")
+    at.segmented_control(key="period").set_value("연간").run()
+    assert any("FY25" in md.value for md in at.markdown)
+    assert next(m.value for m in at.metric if m.label == "매출") == ttm_rev
+    assert next(m.value for m in at.metric if m.label == "영업이익") == ttm_op
+
+
+def test_basis_survives_tab_switch():
+    at = run(t="DEMO")
+    at.segmented_control(key="period").set_value("TTM").run()
+    at.session_state["company_tab"] = "📄 공시"
+    at.run()
+    assert at.segmented_control(key="period").value == "TTM"
+    assert any("TTM 25.12" in md.value for md in at.markdown)

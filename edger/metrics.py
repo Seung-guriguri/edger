@@ -13,7 +13,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-Period = Literal["annual", "quarterly"]
+Period = Literal["annual", "quarterly", "ttm"]
 
 
 @dataclass(frozen=True)
@@ -279,6 +279,26 @@ def metric_series(facts: pd.DataFrame, metric: Metric, period: Period, currency:
     return merged
 
 
+def yoy(table: pd.DataFrame, col: str, period: Period) -> tuple[float | None, float | None]:
+    """(latest value, change vs the same period a year earlier).
+
+    Annual compares with the previous row; quarterly and TTM with four rows back.
+    """
+    if table.empty or col not in table:
+        return None, None
+    s = table[col]
+    if s.dropna().empty:
+        return None, None
+    latest = s.iloc[-1]
+    if pd.isna(latest):
+        return None, None
+    lag = 1 if period == "annual" else 4
+    if len(s) <= lag or pd.isna(s.iloc[-1 - lag]) or s.iloc[-1 - lag] == 0:
+        return float(latest), None
+    prev = float(s.iloc[-1 - lag])
+    return float(latest), (float(latest) - prev) / abs(prev)
+
+
 def period_label(end: pd.Timestamp, period: Period) -> str:
     # 52/53-week fiscal years can end in the first days of January; label them with
     # the year they mostly cover.
@@ -297,12 +317,24 @@ def build_table(raw_facts: pd.DataFrame, period: Period = "annual", n: int = 8) 
     if facts.empty:
         return pd.DataFrame(), currency
 
+    if period == "ttm":
+        table = _ttm_table(_raw_table(facts, "quarterly", currency))
+    else:
+        table = _raw_table(facts, period, currency)
+    if table.empty:
+        return pd.DataFrame(), currency
+    # Derive on the full history first so averages (ROE, ROIC) have the prior period available.
+    return _add_derived(table.copy(), period).tail(n), currency
+
+
+def _raw_table(facts: pd.DataFrame, period: Period, currency: str) -> pd.DataFrame:
+    """One row per period with every metric as reported (no derived columns)."""
     flows = {m.key: metric_series(facts, m, period, currency) for m in METRICS if m.kind == "flow"}
     anchor = flows["revenue"].index.union(flows["net_income"].index)
     if anchor.empty:
         anchor = pd.DatetimeIndex(sorted(set().union(*[s.index for s in flows.values()])))
     if anchor.empty:
-        return pd.DataFrame(), currency
+        return pd.DataFrame()
 
     table = pd.DataFrame(index=pd.DatetimeIndex(anchor).sort_values())
     for key, s in flows.items():
@@ -313,9 +345,34 @@ def build_table(raw_facts: pd.DataFrame, period: Period = "annual", n: int = 8) 
 
     # Annual periods older than gaps in reporting can produce stray rows (e.g. a
     # transition period); keep rows that carry at least revenue or net income.
-    table = table[table[["revenue", "net_income"]].notna().any(axis=1)]
-    table = table.tail(n).copy()
+    return table[table[["revenue", "net_income"]].notna().any(axis=1)]
 
+
+# Flow metrics that are summed over four quarters for TTM. Share counts are averages, not
+# sums, so TTM uses the latest quarter's value for those.
+_TTM_SUM = tuple(m.key for m in METRICS if m.kind == "flow" and m.unit != "shares")
+
+
+def _ttm_table(quarterly: pd.DataFrame) -> pd.DataFrame:
+    """Rolling four-quarter sums at every quarter end.
+
+    A value is kept only when all four quarters exist and are consecutive (~3 months apart);
+    otherwise it would silently mix in a missing quarter as zero.
+    """
+    if quarterly.empty or len(quarterly) < 4:
+        return pd.DataFrame()
+    q = quarterly.copy()
+    gaps = pd.Series(q.index, index=q.index).diff().dt.days
+    ok_gap = gaps.between(*_QUARTER_DAYS)
+    contiguous = ok_gap.rolling(3, min_periods=3).sum().eq(3)  # the 3 gaps inside the window
+    for col in _TTM_SUM:
+        rolled = q[col].rolling(4, min_periods=4).sum()
+        q[col] = rolled.where(contiguous)
+    return q[q[["revenue", "net_income"]].notna().any(axis=1)]
+
+
+def _add_derived(table: pd.DataFrame, period: Period) -> pd.DataFrame:
+    """Margins, FCF, leverage and return ratios. ``table`` holds reported metrics."""
     rev = table["revenue"].where(table["revenue"] != 0)
     table["fcf"] = table["ocf"] - table["capex"].fillna(0)
     table.loc[table["ocf"].isna(), "fcf"] = np.nan
@@ -337,17 +394,23 @@ def build_table(raw_facts: pd.DataFrame, period: Period = "annual", n: int = 8) 
     table["interest_coverage"] = table["operating_income"] / table["interest_expense"].where(
         table["interest_expense"] > 0)
     table["payout_ratio"] = table["dividends"] / table["net_income"].where(table["net_income"] > 0)
-    if period == "annual":
+    if period in ("annual", "ttm"):
+        # Twelve months of flows: returns use average capital over that year (one row back
+        # for annual, four quarters back for TTM); the earliest rows fall back to period-end.
+        lag = 1 if period == "annual" else 4
+
+        def avg(col_values: pd.Series) -> pd.Series:
+            return ((col_values + col_values.shift(lag)) / 2).fillna(col_values)
+
         table["net_debt_ebitda"] = table["net_debt"] / table["ebitda"].where(table["ebitda"] > 0)
-        avg_assets = ((table["assets"] + table["assets"].shift(1)) / 2).fillna(table["assets"])
+        avg_assets = avg(table["assets"])
         table["roa"] = table["net_income"] / avg_assets.where(avg_assets > 0)
-        # Returns use average capital over the year; the first row falls back to year-end.
-        avg_eq = ((table["equity"] + table["equity"].shift(1)) / 2).fillna(table["equity"])
+        avg_eq = avg(table["equity"])
         table["roe"] = table["net_income"] / avg_eq.where(avg_eq > 0)
         tax_rate = (table["income_tax"] / table["pretax_income"].where(table["pretax_income"] > 0)).clip(0, 0.5)
         nopat = table["operating_income"] * (1 - tax_rate.fillna(0.21))
         invested = table["equity"] + table["debt"].fillna(0) - table["cash"].fillna(0)
-        avg_inv = ((invested + invested.shift(1)) / 2).fillna(invested)
+        avg_inv = avg(invested)
         table["roic"] = nopat / avg_inv.where(avg_inv > 0)
     else:
         for col in ("roe", "roic", "roa", "net_debt_ebitda"):
@@ -355,7 +418,7 @@ def build_table(raw_facts: pd.DataFrame, period: Period = "annual", n: int = 8) 
 
     table.insert(0, "label", [period_label(d, period) for d in table.index])
     table.index.name = "period_end"
-    return table, currency
+    return table
 
 
 def change(table: pd.DataFrame, col: str) -> tuple[float | None, float | None]:
@@ -372,14 +435,18 @@ def change(table: pd.DataFrame, col: str) -> tuple[float | None, float | None]:
     return latest, (latest - prev) / abs(prev)
 
 
-def cagr(table: pd.DataFrame, col: str, years: int) -> float | None:
-    """Compound annual growth over ``years`` for an annual table; None if not computable."""
+def cagr(table: pd.DataFrame, col: str, years: int, rows_per_year: int = 1) -> float | None:
+    """Compound annual growth over ``years``; None if not computable.
+
+    ``rows_per_year`` is 1 for annual tables and 4 for quarterly-spaced TTM tables.
+    """
     if table.empty or col not in table:
         return None
-    s = table[col].dropna()
-    if len(s) <= years:
+    s = table[col]
+    steps = years * rows_per_year
+    if len(s) <= steps or pd.isna(s.iloc[-1]) or pd.isna(s.iloc[-1 - steps]):
         return None
-    start, end = float(s.iloc[-1 - years]), float(s.iloc[-1])
+    start, end = float(s.iloc[-1 - steps]), float(s.iloc[-1])
     if start <= 0 or end <= 0:
         return None
     return (end / start) ** (1 / years) - 1

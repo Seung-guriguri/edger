@@ -7,12 +7,14 @@ import pandas as pd
 import streamlit as st
 
 from . import charts, data, fmt, watchlist
-from .metrics import DERIVED_LABELS, METRIC_BY_KEY, cagr, change, historical_per
+from .metrics import DERIVED_LABELS, METRIC_BY_KEY, cagr, historical_per, yoy
 from .ui import (kpi_grid, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
                  load_profile, load_snapshot, load_statement, load_table, plot,
                  safe_markdown_text, theme_mode)
 
 
+BASES = {"연간": "annual", "TTM": "ttm", "분기": "quarterly"}
+BASIS_NOTE = {"annual": "전년 대비", "ttm": "1년 전 TTM 대비", "quarterly": "전년 같은 분기 대비"}
 TABS = {"📈 재무": "fin", "💹 주가·가치": "val", "📄 공시": "filings", "👤 내부자": "ins"}
 
 
@@ -39,7 +41,21 @@ def render(ticker: str) -> None:
     _header(ticker, profile)
     annual = snap["annual"] if snap else pd.DataFrame()
     currency = snap["currency"] if snap else "USD"
-    _kpis(snap, annual, currency)
+
+    # One basis for the cards and the 재무 tab. It lives outside the tabs so it keeps its
+    # value while another tab is open (only the open tab's widgets exist).
+    basis = st.segmented_control("기준", list(BASES), default="연간", key="period",
+                                 label_visibility="collapsed", help="연간: 회계연도 · TTM: 최근 4분기 합계 · 분기: 단일 분기") or "연간"
+    period_key = BASES[basis]
+    if period_key == "annual":
+        table = annual
+    else:
+        try:
+            table, currency = load_table(ticker, period_key, 12)
+        except Exception as exc:
+            table = pd.DataFrame()
+            st.warning(f"{basis} 데이터를 불러오지 못했습니다: {exc}")
+    _kpis(snap, table, period_key, currency)
 
     mode = theme_mode()
     # Stateful tabs: the open tab survives reruns, and only the open tab is rendered, so e.g.
@@ -53,7 +69,7 @@ def render(ticker: str) -> None:
         with tab:
             name = TABS[label]
             if name == "fin":
-                _financials(ticker, annual, currency, mode)
+                _financials(ticker, table, annual, period_key, currency, mode)
             elif name == "val":
                 _valuation(ticker, snap, annual, currency, mode)
             elif name == "filings":
@@ -80,7 +96,7 @@ def _header(ticker: str, profile: dict) -> None:
               on_click=watchlist.toggle, args=(ticker,), type="secondary")
 
 
-def _kpis(snap: dict | None, annual: pd.DataFrame, currency: str) -> None:
+def _kpis(snap: dict | None, table: pd.DataFrame, period: str, currency: str) -> None:
     items = []
     if snap:
         q = snap["quote"]
@@ -91,48 +107,32 @@ def _kpis(snap: dict | None, annual: pd.DataFrame, currency: str) -> None:
             per = snap["valuation"].get("per")
             items.append(("시가총액", fmt.money(snap["market_cap"], q.get("currency", "USD")),
                           f"PER {per:.1f}배" if per else None,
-                          {"neutral": True, "help": f"계산 방식: {snap.get('cap_source')}"}))
-    if not annual.empty:
-        last_label = annual["label"].iloc[-1]
-        rev, rev_d = change(annual, "revenue")
-        ni, ni_d = change(annual, "net_income")
-        om = annual["operating_margin"].dropna()
-        items += [
-            (f"매출 · {last_label}", fmt.money(rev, currency), rev_d, {"help": "전년 대비 증감률"}),
-            (f"순이익 · {last_label}", fmt.money(ni, currency), ni_d, {"help": "전년 대비 증감률"}),
-        ]
-        v = snap["valuation"] if snap else {}
-        eps_val = v.get("eps")
-        if eps_val is None:
-            eps_val, eps_d = change(annual, "eps")
-            eps_label = f"EPS · {last_label}"
-        else:
-            eps_d, eps_label = v.get("eps_growth"), "EPS · 최근 4분기"
-        items.append((eps_label, fmt.per_share(eps_val, currency), eps_d,
-                      {"help": "희석 주당순이익, 1년 전 같은 기간 대비"}))
-        roe = annual["roe"].dropna()
-        items.append(("ROE", fmt.pct(roe.iloc[-1]) if len(roe) else "–",
-                      (roe.iloc[-1] - roe.iloc[-2]) if len(roe) > 1 else None,
-                      {"pp": True, "help": "순이익 ÷ 평균 자본, 전년 대비 %p"}))
+                          {"neutral": True, "help": f"계산 방식: {snap.get('cap_source')} · PER은 최근 4분기 기준"}))
+    if not table.empty:
+        tag = {"annual": table["label"].iloc[-1], "ttm": f"TTM {table['label'].iloc[-1]}",
+               "quarterly": f"{table['label'].iloc[-1]}분기"}[period]
+        note = BASIS_NOTE[period]
+        for col, name in (("revenue", "매출"), ("operating_income", "영업이익"),
+                          ("net_income", "순이익")):
+            value, delta = yoy(table, col, period)
+            items.append((name, fmt.money(value, currency), delta, {"help": f"{tag} · {note}"}))
+        eps, eps_d = yoy(table, "eps", period)
+        items.append(("EPS", fmt.per_share(eps, currency), eps_d,
+                      {"help": f"희석 주당순이익 · {tag} · {note}"}))
+        st.markdown(f'<div class="ed-sub">실적: <b>{html.escape(tag)}</b> 기준 · 증감은 {note}</div>',
+                    unsafe_allow_html=True)
     if items:
         kpi_grid(items, "top")
 
 
 # ---------------------------------------------------------------- 재무
-def _financials(ticker: str, annual: pd.DataFrame, currency: str, mode: str) -> None:
-    period = st.segmented_control("기간", ["연간", "분기"], default="연간", key="period",
-                                  label_visibility="collapsed") or "연간"
-    if period == "연간":
-        table = annual
-    else:
-        try:
-            table, currency = load_table(ticker, "quarterly", 12)
-        except Exception as exc:
-            table = pd.DataFrame()
-            st.warning(f"분기 데이터를 불러오지 못했습니다: {exc}")
+def _financials(ticker: str, table: pd.DataFrame, annual: pd.DataFrame, period_key: str,
+                currency: str, mode: str) -> None:
     if table.empty:
         st.info("이 회사는 XBRL 재무 데이터가 없습니다 (펀드, 신규 상장사, 일부 외국 기업 등).")
         return
+    if period_key == "ttm":
+        st.caption("TTM = 각 분기 시점의 최근 4분기 합계. 계절성 없이 추세를 볼 수 있습니다.")
 
     choices = {"매출": "revenue", "영업이익": "operating_income", "EBITDA": "ebitda",
                "순이익": "net_income", "EPS": "eps", "FCF": "fcf", "배당(DPS)": "dps",
@@ -152,17 +152,17 @@ def _financials(ticker: str, annual: pd.DataFrame, currency: str, mode: str) -> 
     plot(charts.margin_lines(table, {"gross_margin": "매출총이익률", "ebitda_margin": "EBITDA 마진",
                                      "operating_margin": "영업이익률", "net_margin": "순이익률"}, mode))
 
-    if period == "연간" and table[["roe", "roic"]].notna().any().any():
+    if period_key != "quarterly" and table[["roe", "roic"]].notna().any().any():
         st.markdown("**자본 수익률**")
         plot(charts.margin_lines(table, {"roe": "ROE", "roic": "ROIC", "roa": "ROA"}, mode))
         st.caption("ROE = 순이익 ÷ 평균 자본. ROIC = 세후 영업이익 ÷ 평균 투하자본(자본 + 차입금 − 현금), "
                    "세율은 실효세율(없으면 21%). ROA = 순이익 ÷ 평균 총자산.")
 
-    if period == "연간":
-        _growth(table)
+    _growth(table, period_key)
 
     latest = table.iloc[-1]
-    yearly = annual.iloc[-1] if not annual.empty else latest  # ratios that need a full year of flows
+    # ratios that need twelve months of flows: TTM has them at the latest quarter
+    yearly = latest if period_key != "quarterly" or annual.empty else annual.iloc[-1]
 
     def times(x):
         return f"{x:.1f}배" if x is not None and pd.notna(x) else "–"
@@ -181,7 +181,11 @@ def _financials(ticker: str, annual: pd.DataFrame, currency: str, mode: str) -> 
          {"help": f"빚을 영업현금으로 몇 년에 갚는지 ({yearly['label']}). 3배 이상이면 부담"}),
     ], "bs")
 
-    _statements(ticker, "annual" if period == "연간" else "quarterly", currency)
+    if period_key == "ttm":
+        st.markdown("**전체 재무제표**")
+        st.caption("전체 재무제표는 공시 단위(연간·분기)로만 볼 수 있습니다. 위에서 연간 또는 분기를 선택하세요.")
+    else:
+        _statements(ticker, period_key, currency)
 
     with st.expander("요약 표로 보기"):
         view = pd.DataFrame({"기간": table["label"]})
@@ -189,20 +193,23 @@ def _financials(ticker: str, annual: pd.DataFrame, currency: str, mode: str) -> 
             view[_label(c)] = [fmt.money(v, currency) for v in table[c]]
         view["영업이익률"] = [fmt.pct(v) for v in table["operating_margin"]]
         view["EPS"] = [fmt.per_share(v, currency) for v in table["eps"]]
-        if period == "연간":
+        if period_key != "quarterly":
             view["ROE"] = [fmt.pct(v) for v in table["roe"]]
             view["ROIC"] = [fmt.pct(v) for v in table["roic"]]
         st.dataframe(view.iloc[::-1], hide_index=True, width="stretch")
     st.caption("XBRL 원천 데이터 기준. 분기 4Q와 분기 현금흐름은 누적치 차감으로 계산했습니다.")
 
 
-def _growth(annual: pd.DataFrame) -> None:
+def _growth(table: pd.DataFrame, period_key: str) -> None:
+    rpy = 1 if period_key == "annual" else 4  # rows per year
+    first = "1년" if period_key == "annual" else "전년 동기"
     rows = []
     for col in ("revenue", "operating_income", "net_income", "eps", "fcf"):
-        _, yoy = change(annual, col)
-        rows.append({"항목": _label(col), "1년": fmt.pct(yoy, signed=True),
-                     "3년 CAGR": fmt.pct(cagr(annual, col, 3), signed=True),
-                     "5년 CAGR": fmt.pct(cagr(annual, col, 5), signed=True)})
+        _, one = yoy(table, col, period_key)
+        row = {"항목": _label(col), first: fmt.pct(one, signed=True)}
+        if period_key != "quarterly":  # multi-year growth of single quarters is mostly noise
+            row["3년 CAGR"] = fmt.pct(cagr(table, col, 3, rows_per_year=rpy), signed=True)
+        rows.append(row)
     st.markdown("**성장률**")
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
     st.caption("CAGR = 연평균 성장률. 시작·끝 값이 음수(적자)면 계산하지 않습니다(–).")

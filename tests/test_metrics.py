@@ -186,3 +186,23 @@ def test_market_cap_fallback_chain(monkeypatch):
     cap, src = ui.market_cap_estimate("X", {"price": 5.0, "market_cap": 99.0}, pd.DataFrame(), annual)
     assert cap == 99.0
     assert ui.market_cap_estimate("X", {"price": None}, pd.DataFrame(), annual) == (None, None)
+
+
+def test_ttm_table_matches_fiscal_year(facts):
+    t, _ = build_table(facts, "ttm", 12)
+    a, _ = build_table(facts, "annual", 10)
+    for end in ("2024-12-31", "2025-12-31"):
+        for col in ("revenue", "operating_income", "net_income", "fcf", "roe"):
+            assert t.loc[end, col] == pytest.approx(a.loc[end, col], rel=1e-9), (end, col)
+
+
+def test_ttm_drops_windows_with_missing_quarter(facts):
+    from edger.metrics import _ttm_table, _raw_table, prepare_facts, detect_currency
+    f = prepare_facts(facts)
+    q = _raw_table(f, "quarterly", detect_currency(f))
+    q = q.drop(pd.Timestamp("2025-06-30"))
+    t = _ttm_table(q)
+    # windows ending 25.09 and 25.12 would span the gap: dropped, not summed over 3 quarters
+    assert pd.Timestamp("2025-09-30") not in t.index
+    assert pd.Timestamp("2025-12-31") not in t.index
+    assert pd.Timestamp("2025-03-31") in t.index  # window before the gap is still fine
