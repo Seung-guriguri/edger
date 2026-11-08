@@ -592,3 +592,11 @@ def test_band_multiples():
     per = pd.Series(range(10, 41), dtype=float)  # PER 10..40
     assert band_multiples(per) == [13, 19, 25, 30, 35]
     assert band_multiples(pd.Series([20.0] * 5)) == []  # not enough history
+
+
+def test_tradingview_symbol():
+    from edger.ui import tradingview_symbol
+    assert tradingview_symbol("aapl", ["Nasdaq"]) == "NASDAQ:AAPL"
+    assert tradingview_symbol("BRK.B", ["NYSE"]) == "NYSE:BRK.B"
+    assert tradingview_symbol("SPY", ["NYSE Arca"]) == "AMEX:SPY"
+    assert tradingview_symbol("XYZ", []) == "XYZ"  # TradingView resolves bare tickers

@@ -9,7 +9,8 @@ import streamlit as st
 from . import charts, data, fmt, watchlist
 from .metrics import (DERIVED_LABELS, METRIC_BY_KEY, cagr, cost_structure, dividend_history,
                       turnaround, yoy, yoy_prev)
-from .ui import (kpi_cards, load_business, load_per_history, metric_rows, section, load_dividends, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
+from .ui import (kpi_cards, load_business, load_per_history, metric_rows, section, tradingview_chart,
+                 tradingview_symbol, load_dividends, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
                  load_profile, load_snapshot, load_statement, load_table, plot,
                  safe_markdown_text, theme_mode)
 
@@ -553,10 +554,19 @@ def _valuation(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: s
         shown = prices[prices.index >= prices.index[-1] - pd.DateOffset(years=_RANGES[rng])]
         first, last = float(shown.iloc[0]), float(shown.iloc[-1])
         section("주가", f"{rng} {fmt.pct(last / first - 1, signed=True)}", key="price",
-                info="종가 기준. 주가는 Yahoo Finance(실패하면 Stooq)에서 15분마다 갱신합니다.")
-        st.segmented_control("기간", list(_RANGES), default="1년", key="price_range",
-                             label_visibility="collapsed", width="stretch")
-        plot(charts.price_line(shown, mode))
+                info="**TradingView**: 캔들·보조지표·그리기 도구가 있는 TradingView 무료 위젯입니다. 차트 위에서 손가락으로 "
+                     "기간을 옮기고 확대할 수 있고, 위쪽 종목명을 눌러 다른 종목으로 바꿀 수도 있습니다.  \n"
+                     "**간단 차트**: 종가 선 그래프에 기간 최고·최저와 현재가를 표시합니다(Yahoo Finance, 15분마다 갱신).")
+        src = st.segmented_control("차트", ["TradingView", "간단 차트"], default="TradingView", key="price_src",
+                                   label_visibility="collapsed", width="stretch") or "TradingView"
+        if src == "TradingView" and not data.is_demo(ticker):
+            profile = load_profile(ticker)
+            tradingview_chart(tradingview_symbol(ticker, profile.get("exchanges")), mode)
+        else:
+            st.segmented_control("기간", list(_RANGES), default="1년", key="price_range",
+                                 label_visibility="collapsed", width="stretch")
+        if src != "TradingView" or data.is_demo(ticker):
+            plot(charts.price_line(shown, mode))
         year = prices[prices.index >= prices.index[-1] - pd.DateOffset(years=1)]
         hi, lo = float(year.max()), float(year.min())
         metric_rows([

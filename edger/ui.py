@@ -470,3 +470,52 @@ def safe_markdown_text(text: str) -> str:
     """Filing text rendered as Markdown: escape '$' (LaTeX) and keep paragraphs."""
     text = text.replace("$", "\\$")
     return re.sub(r"\n{3,}", "\n\n", text)
+
+
+# ---------------------------------------------------------------- TradingView widget
+_TV_EXCHANGES = {"nasdaq": "NASDAQ", "nyse": "NYSE", "nyse american": "AMEX", "nyse arca": "AMEX",
+                 "amex": "AMEX", "cboe": "CBOE", "otc": "OTC", "bats": "BATS"}
+
+
+def tradingview_symbol(ticker: str, exchanges: list[str] | None) -> str:
+    """'NASDAQ:AAPL' style symbol. Without a known exchange TradingView resolves the bare ticker."""
+    for ex in exchanges or []:
+        prefix = _TV_EXCHANGES.get(str(ex).strip().lower())
+        if prefix:
+            return f"{prefix}:{ticker.upper()}"
+    return ticker.upper()
+
+
+def tradingview_chart(symbol: str, mode: str, height: int = 460, range_: str = "12M") -> None:
+    """TradingView's free Advanced Chart widget (candles, indicators, drawing tools).
+
+    Loaded from TradingView in the viewer's browser; the attribution link below the chart is
+    part of the widget's terms and stays visible."""
+    import json
+
+    import streamlit.components.v1 as components
+
+    bg = "#0e1117" if mode == "dark" else "#ffffff"
+    grid = "rgba(240,239,236,0.06)" if mode == "dark" else "rgba(11,11,11,0.06)"
+    config = {
+        # explicit size: "autosize" ignored the container height inside Streamlit's iframe
+        "autosize": False, "width": "100%", "height": height - 24, "symbol": symbol, "interval": "D", "range": range_, "timezone": "America/New_York",
+        "theme": mode, "style": "1", "locale": "kr", "allow_symbol_change": True,
+        "hide_side_toolbar": True, "hide_top_toolbar": False, "withdateranges": True,
+        "save_image": False, "calendar": False, "details": False, "hotlist": False,
+        "backgroundColor": bg, "gridColor": grid, "support_host": "https://www.tradingview.com",
+    }
+    html = f"""
+<div class="tradingview-widget-container" style="width:100%">
+  <div class="tradingview-widget-container__widget" style="height:{height - 24}px;width:100%"></div>
+  <div class="tradingview-widget-copyright" style="font:12px sans-serif;text-align:right;padding-top:4px">
+    <a href="https://www.tradingview.com/symbols/{symbol.replace(':', '-')}/" rel="noopener nofollow" target="_blank"
+       style="color:{'#9aa0a6' if mode == 'dark' else '#6b6a66'};text-decoration:none">{symbol} 차트 · TradingView</a>
+  </div>
+  <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+  {json.dumps(config)}
+  </script>
+</div>
+<style>html,body{{margin:0;background:transparent;}}</style>
+"""
+    components.html(html, height=height + 2)
