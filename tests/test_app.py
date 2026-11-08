@@ -56,7 +56,8 @@ def test_valuation_tab():
     at = run(tab="가치", t="DEMO")
     text = page_text(at)
     assert "52주 최고" in text
-    for expected in ("PER", "PBR", "EV/EBITDA", "EV/EBIT", "PEG", "EPS", "BPS", "1년 전 대비"):
+    for expected in ("PER", "PBR", "EV/EBITDA", "EV/EBIT", "PEG", "EPS", "BPS", "1년 전 대비", "PER 추이", "PER 밴드",
+                     "중앙값"):
         assert expected in text, expected
 
 

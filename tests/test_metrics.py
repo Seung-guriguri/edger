@@ -555,3 +555,40 @@ def test_presented_costs_by_nature():
     assert out["items"][col].sum() == pytest.approx(57.6)
     assert out["names"]["인건비"] == "Salaries and related costs"
     assert out["operating_income"][col] == 5.8 and out["revenue"][prev] == 61.6
+
+
+def test_split_adjusted_shares_and_per():
+    """AAPL-like 4-for-1 split on 2020-08-31: share counts filed before it are x4, so PER
+    (market cap / TTM net income) is continuous across the split."""
+    from edger.metrics import per_history, split_adjusted_shares
+    facts = pd.DataFrame([
+        dict(concept="dei:EntityCommonStockSharesOutstanding", numeric_value=4.3e9, period_end="2020-01-17",
+             filing_date="2020-01-29"),
+        dict(concept="dei:EntityCommonStockSharesOutstanding", numeric_value=17.0e9, period_end="2020-10-16",
+             filing_date="2020-10-30"),
+    ])
+    splits = pd.Series([4.0], index=pd.to_datetime(["2020-08-31"]))
+    sh = split_adjusted_shares(facts, splits)
+    assert sh.loc["2020-01-17"] == pytest.approx(17.2e9) and sh.loc["2020-10-16"] == pytest.approx(17.0e9)
+
+    prices = pd.Series(100.0, index=pd.bdate_range("2020-01-01", "2020-12-31"))  # split-adjusted
+    ttm = pd.DataFrame({"net_income": [57e9, 57e9, 57e9, 57e9]},
+                       index=pd.to_datetime(["2019-12-28", "2020-03-28", "2020-06-27", "2020-09-26"]))
+    h = per_history(prices, ttm, sh)
+    # before the split: 100 * 17.2e9 / 57e9 ~= 30.2, after: 100 * 17.0e9 / 57e9 ~= 29.8 — no 4x jump
+    assert h["per"].min() > 25 and h["per"].max() < 35
+
+
+def test_per_history_blanks_losses():
+    from edger.metrics import per_history
+    prices = pd.Series(50.0, index=pd.bdate_range("2024-01-01", "2024-06-30"))
+    ttm = pd.DataFrame({"net_income": [-1e9, 2e9]}, index=pd.to_datetime(["2023-12-31", "2024-03-31"]))
+    h = per_history(prices, ttm, pd.Series([1e9], index=pd.to_datetime(["2023-12-31"])))
+    assert h.loc[:"2024-03-29", "per"].isna().all() and h.loc["2024-04-05":, "per"].notna().all()
+
+
+def test_band_multiples():
+    from edger.metrics import band_multiples
+    per = pd.Series(range(10, 41), dtype=float)  # PER 10..40
+    assert band_multiples(per) == [13, 19, 25, 30, 35]
+    assert band_multiples(pd.Series([20.0] * 5)) == []  # not enough history

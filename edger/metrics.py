@@ -924,3 +924,78 @@ def cost_structure(row: pd.Series) -> dict | None:
     else:
         base = sum(parts.values())
     return {"parts": pd.Series(parts, dtype=float), "base": base, "loss": opi <= 0, "exact": exact}
+
+
+# ---------------------------------------------------------------- PER history & band
+def split_adjusted_shares(raw_facts: pd.DataFrame, splits: pd.Series) -> pd.Series:
+    """Shares outstanding over time on today's share basis.
+
+    Cover-page share counts (dei) are as of each filing; a later split multiplies them. Each
+    count is scaled by the splits dated after the filing it came from, so it lines up with
+    split-adjusted prices. Multi-class companies: classes reported for the same date add up.
+    """
+    if raw_facts is None or raw_facts.empty:
+        return pd.Series(dtype=float)
+    sub = raw_facts[raw_facts["concept"].isin(SHARES_OUTSTANDING_CONCEPTS) & raw_facts["numeric_value"].notna()]
+    if sub.empty:
+        return pd.Series(dtype=float)
+    sub = sub.assign(period_end=pd.to_datetime(sub["period_end"]), filing_date=pd.to_datetime(sub["filing_date"]))
+    # one filing per date: the first one that reported it (the as-of-then share basis)
+    first = sub.groupby("period_end")["filing_date"].transform("min")
+    sub = sub[sub["filing_date"] == first]
+    shares = sub.groupby(["period_end", "filing_date"])["numeric_value"].sum().reset_index()
+    if splits is None or splits.empty:
+        splits = pd.Series(dtype=float, index=pd.DatetimeIndex([]))
+    splits = splits.copy()
+    splits.index = pd.DatetimeIndex(splits.index)
+
+    def factor(filed):
+        later = splits[splits.index > filed]
+        return float(later.prod()) if len(later) else 1.0
+
+    shares["adj"] = shares["numeric_value"] * shares["filing_date"].map(factor)
+    return shares.set_index("period_end")["adj"].sort_index()
+
+
+def per_history(prices: pd.Series, ttm_table: pd.DataFrame, shares: pd.Series) -> pd.DataFrame:
+    """Weekly price, split-adjusted TTM EPS and PER.
+
+    PER = market cap / TTM net income (price x split-adjusted shares / earnings), so stock
+    splits cannot distort it the way price / reported EPS does (AAPL showed PER ~4 for 2018).
+    Earnings and shares step at each quarter end and carry forward until the next.
+    """
+    cols = ["price", "eps", "per"]
+    if prices is None or prices.empty or ttm_table is None or ttm_table.empty or shares is None or shares.empty:
+        return pd.DataFrame(columns=cols)
+    weekly = prices.resample("W-FRI").last().dropna()
+    ni = ttm_table["net_income"].dropna()
+    if ni.empty:
+        return pd.DataFrame(columns=cols)
+    ni_w = ni.reindex(ni.index.union(weekly.index)).ffill().reindex(weekly.index)
+    sh_w = shares.reindex(shares.index.union(weekly.index)).ffill().bfill().reindex(weekly.index)
+    eps = ni_w / sh_w
+    out = pd.DataFrame({"price": weekly, "eps": eps})
+    out = out[out.index >= ni.index.min()]  # no earnings before the first TTM quarter
+    out["per"] = (out["price"] / out["eps"]).where(out["eps"] > 0)
+    return out
+
+
+def _nice(x: float) -> float:
+    """Round a multiple to a readable step: 1 below 20, 5 below 100, 10 above."""
+    step = 1 if x < 20 else 5 if x < 100 else 10
+    return max(step, round(x / step) * step)
+
+
+def band_multiples(per: pd.Series) -> list[float]:
+    """Five band multiples from this company's own PER history (10/30/50/70/90th percentile),
+    rounded to readable numbers and de-duplicated."""
+    p = per.dropna()
+    p = p[(p > 0) & (p < 1000)]
+    if len(p) < 20:
+        return []
+    out = []
+    for q in (0.1, 0.3, 0.5, 0.7, 0.9):
+        m = _nice(float(p.quantile(q)))
+        if m not in out:
+            out.append(m)
+    return out

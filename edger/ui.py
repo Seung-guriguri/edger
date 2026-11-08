@@ -269,6 +269,32 @@ def _converted(values: dict | pd.Series | None, rate: float, keys) -> dict | Non
     return out
 
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def _cached_splits(ticker: str) -> pd.Series:
+    s, ok = market.splits(ticker)
+    if not ok:
+        raise _NoPrice(ticker)
+    return s
+
+
+def load_per_history(ticker: str) -> pd.DataFrame:
+    """Weekly price / split-adjusted EPS / PER for ~10 years (empty when not computable).
+
+    Without the split history PER before a split would be wrong, so a failed split lookup
+    gives an empty result rather than a misleading chart."""
+    from .metrics import per_history, split_adjusted_shares
+
+    try:
+        splits = _cached_splits(ticker)
+    except _NoPrice:
+        return pd.DataFrame(columns=["price", "eps", "per"])
+    ttm_table, _ = load_table(ticker, "ttm", 48)
+    if ttm_table.attrs.get("source") == "Yahoo":
+        return pd.DataFrame(columns=["price", "eps", "per"])  # only ~5 quarters: no history
+    shares = split_adjusted_shares(load_facts(ticker), splits)
+    return per_history(load_prices(ticker, "10y"), ttm_table, shares)
+
+
 def retry_prices() -> None:
     """Forget failures so the next run asks the price sources again."""
     st.session_state.pop("_price_failures", None)

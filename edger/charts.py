@@ -446,3 +446,67 @@ def donut(parts: pd.Series, mode: str, center_title: str, center_value: str,
         ],
     )
     return fig
+
+
+# ---------------------------------------------------------------- PER history & band
+def per_line(hist: pd.DataFrame, mode: str, median: float | None = None) -> go.Figure:
+    """Weekly PER with this company's median as a reference line and the latest value labelled."""
+    p = PALETTE[mode]
+    per = hist["per"]
+    fig = go.Figure(go.Scatter(
+        x=per.index, y=per.values, mode="lines", connectgaps=False, line=dict(width=2, color=p["series"][0]),
+        hovertemplate="%{x|%Y-%m-%d}<br>PER <b>%{y:.1f}배</b><extra></extra>", showlegend=False,
+    ))
+    fig = _base(fig, mode, height=230, legend=False, right=8)
+    fig.update_layout(hovermode="x", margin=dict(t=22))
+    fig.update_xaxes(type="date", tickformat="%y", nticks=8, showspikes=True, spikemode="across",
+                     spikethickness=1, spikecolor=p["axis"], spikedash="solid", spikesnap="cursor",
+                     range=[per.index[0], per.index[-1]])
+    valid = per.dropna()
+    if not valid.empty:
+        # extreme spikes (earnings near zero) would flatten everything else: clip the view
+        top = float(valid.quantile(0.97)) * 1.15
+        fig.update_yaxes(ticksuffix="배", zeroline=False, range=[0, max(top, float(valid.iloc[-1]) * 1.15)])
+        fig.add_annotation(x=valid.index[-1], y=float(valid.iloc[-1]), text=f"{valid.iloc[-1]:.1f}배",
+                           showarrow=False, xanchor="right", yanchor="bottom", yshift=8,
+                           font=dict(size=12, color=p["ink"]), bgcolor=p["surface"], borderpad=2)
+    if median:
+        fig.add_hline(y=median, line=dict(color=p["ink2"], width=1),
+                      annotation_text=f"중앙값 {median:.1f}배", annotation_position="top left",
+                      annotation_font=dict(size=11, color=p["ink2"]))
+    return fig
+
+
+def per_band(hist: pd.DataFrame, multiples: list[float], mode: str, currency: str = "USD") -> go.Figure:
+    """Price against 'TTM EPS x multiple' lines. Bands are an ordered series, so they use one
+    grey ramp light -> dark; only the price wears the accent colour."""
+    p = PALETTE[mode]
+    sym = "$" if currency == "USD" else ""
+    fig = go.Figure()
+    n = len(multiples)
+    eps = hist["eps"].where(hist["eps"] > 0)  # a band through negative earnings is meaningless
+    ink = p["ink"].lstrip("#")
+    r, g, b = (int(ink[i:i + 2], 16) for i in (0, 2, 4))
+    for i, m in enumerate(multiples):
+        # one ramp of the text colour (dark on light, light on dark): low multiple faint, high strong
+        alpha = 0.18 + 0.42 * (i / max(n - 1, 1))
+        grey = f"rgba({r},{g},{b},{alpha:.2f})"
+        y = eps * m
+        fig.add_trace(go.Scatter(
+            x=hist.index, y=y, mode="lines", connectgaps=False, line=dict(width=1.3, color=grey),
+            name=f"{m:g}배", hovertemplate=f"{m:g}배 {sym}%{{y:,.0f}}<extra></extra>", showlegend=False,
+        ))
+        last = y.dropna()
+        if not last.empty:
+            fig.add_annotation(x=last.index[-1], y=float(last.iloc[-1]), text=f"{m:g}배", showarrow=False,
+                               xanchor="left", xshift=4, font=dict(size=10, color=p["ink2"]))
+    fig.add_trace(go.Scatter(
+        x=hist.index, y=hist["price"], mode="lines", line=dict(width=2, color=p["series"][0]), name="주가",
+        hovertemplate=f"주가 <b>{sym}%{{y:,.2f}}</b><extra></extra>", showlegend=False,
+    ))
+    fig = _base(fig, mode, height=270, legend=False, right=40)
+    fig.update_layout(hovermode="x unified", margin=dict(t=12))
+    fig.update_xaxes(type="date", tickformat="%y", nticks=8, range=[hist.index[0], hist.index[-1]])
+    top = float(hist["price"].max()) * 1.6  # keep the price readable when high bands run off
+    fig.update_yaxes(tickprefix=sym, zeroline=False, range=[0, top])
+    return fig

@@ -7,9 +7,9 @@ import pandas as pd
 import streamlit as st
 
 from . import charts, data, fmt, watchlist
-from .metrics import (DERIVED_LABELS, METRIC_BY_KEY, cagr, cost_structure, dividend_history, historical_per,
+from .metrics import (DERIVED_LABELS, METRIC_BY_KEY, cagr, cost_structure, dividend_history,
                       turnaround, yoy, yoy_prev)
-from .ui import (kpi_cards, load_business, metric_rows, section, load_dividends, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
+from .ui import (kpi_cards, load_business, load_per_history, metric_rows, section, load_dividends, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
                  load_profile, load_snapshot, load_statement, load_table, plot,
                  safe_markdown_text, theme_mode)
 
@@ -232,17 +232,15 @@ def _signals(ticker: str, snap: dict | None, table: pd.DataFrame, annual: pd.Dat
                          "note": f"P/FFO {p_ffo:.1f}배 · 리츠는 보통 12~22배"})
     elif v.get("per"):
         per = v["per"]
-        hist = pd.DataFrame()
-        if not (snap or {}).get("fx") and not annual.empty:
-            prices = load_prices(ticker, "10y")
-            hist = historical_per(annual, prices) if not prices.empty else pd.DataFrame()
+        hist = load_per_history(ticker) if not (snap or {}).get("fx") else pd.DataFrame()
         hist_per = hist["per"].dropna() if not hist.empty else pd.Series(dtype=float)
-        if len(hist_per) >= 3:
+        years = (hist_per.index[-1] - hist_per.index[0]).days / 365.25 if len(hist_per) else 0
+        if years >= 2:
             med = float(hist_per.median())
             gap = per / med - 1
             tone, word = ("warn", "비쌈") if gap > 0.2 else ("good", "쌈") if gap < -0.2 else (None, "보통")
             rows.append({"label": "밸류에이션", "value": word, "value_tone": tone,
-                         "note": f"PER {per:.1f}배 · 과거 {len(hist_per)}년 중앙값 {med:.1f}배보다 "
+                         "note": f"PER {per:.1f}배 · 과거 {years:.0f}년 중앙값 {med:.1f}배보다 "
                                  f"{abs(gap) * 100:.0f}% {'높음' if gap >= 0 else '낮음'}"})
         else:
             rows.append({"label": "밸류에이션", "value": f"PER {per:.1f}배",
@@ -619,16 +617,41 @@ def _valuation(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: s
          "note": "시가총액 ÷ 주가" if not snap.get("fx") else "ADR이라 계산하지 않음"},
     ])
 
-    # Per-share history mixes ADR prices with ordinary-share EPS for foreign filers: skip.
-    per = historical_per(annual, prices) if not snap.get("fx") else pd.DataFrame()
-    if not per.empty and per["per"].notna().sum() >= 2:
-        section("연도별 PER", key="perhist", info="회계연도 말 종가 ÷ 그해 희석 EPS. 가로선은 현재 PER입니다.")
-        plot(charts.per_bars(per, mode, current=v["per"]))
-        hist = per["per"].dropna()
-        if v["per"]:
-            st.caption(f"과거 {len(hist)}년 PER 중앙값 {hist.median():.1f}배 · 현재 {v['per']:.1f}배")
+    _per_history(ticker, snap, currency, mode)
 
 
+def _per_history(ticker: str, snap: dict, currency: str, mode: str) -> None:
+    """PER over time and the PER band (price against EPS x multiples)."""
+    if snap.get("fx"):
+        st.caption("외국 기업(ADR)은 주가와 주당 실적의 단위가 달라 PER 추이·밴드를 그리지 않습니다.")
+        return
+    hist = load_per_history(ticker)
+    per = hist["per"].dropna() if not hist.empty else pd.Series(dtype=float)
+    if len(per) < 20:
+        st.caption("PER 추이를 그릴 만큼 과거 실적·주가 기록이 없습니다.")
+        return
+    years = max(1, round((per.index[-1] - per.index[0]).days / 365.25))
+    med = float(per.median())
+    section("PER 추이", f"최근 {years}년 · 주 단위", key="perline",
+            info="매주 PER = 시가총액 ÷ 그 시점의 최근 4분기 순이익. 주식 분할이 있어도 왜곡되지 않도록 주당순이익 대신 "
+                 "시가총액과 순이익으로 계산합니다(분할 이력은 Yahoo). 실적은 분기말 기준으로 반영되고, 적자 구간은 "
+                 "비어 있습니다.")
+    plot(charts.per_line(hist, mode, median=med))
+    now = float(per.iloc[-1])
+    lo, hi = float(per.quantile(0.1)), float(per.quantile(0.9))
+    pos = (per <= now).mean()
+    # (no "~": Markdown would turn "a~b" spans into strikethrough)
+    st.caption(f"현재 {now:.1f}배 · 과거 {years}년 중앙값 {med:.1f}배 · 보통 범위 {lo:.1f}–{hi:.1f}배"
+               f"(하위·상위 10% 제외) · 과거 {pos * 100:.0f}% 시점보다 높음")
+
+    from .metrics import band_multiples
+    multiples = band_multiples(per)
+    if len(multiples) >= 3:
+        section("PER 밴드", " · ".join(f"{m:g}배" for m in multiples), key="perband",
+                info="회색 선은 '그 시점의 최근 4분기 주당순이익 × 배수'입니다. 파란 주가가 어느 선 근처에 있는지로 "
+                     "과거 대비 몇 배에 거래되는지 봅니다. 배수는 이 회사 과거 PER의 하위 10·30·50·70·90% 지점을 "
+                     "보기 좋은 숫자로 반올림한 값입니다.")
+        plot(charts.per_band(hist, multiples, mode, currency))
 def _no_market_cap(snap: dict | None) -> None:
     if snap and snap["quote"].get("price"):
         reason = ("주가는 받았지만 발행주식수를 찾지 못했습니다 "

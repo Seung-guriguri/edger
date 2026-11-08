@@ -296,3 +296,20 @@ def yahoo_quarterly(ticker: str) -> dict | None:
     if "shares_diluted" in raw and "net_income" in raw:
         raw["eps"] = raw["net_income"] / raw["shares_diluted"]  # NaN for ADRs (see above)
     return {"raw": raw, "currency": currency, "per_share_ok": per_share_ok}
+
+
+def splits(ticker: str) -> tuple[pd.Series, bool]:
+    """(stock splits as ratio by date, ok). AAPL 2020-08-31 -> 4.0 for a 4-for-1 split."""
+    if demo.is_demo(ticker):
+        return pd.Series(dtype=float), True
+    try:
+        import yfinance as yf
+
+        s = yf.Ticker(ticker).splits
+    except Exception:
+        return pd.Series(dtype=float), False
+    if s is None:
+        return pd.Series(dtype=float), False
+    s = s[s > 0]
+    s.index = pd.DatetimeIndex(s.index).tz_localize(None).normalize()
+    return s.sort_index(), True
