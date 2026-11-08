@@ -109,6 +109,11 @@ def load_filing_sections(ticker: str, accession: str, form: str) -> list[dict]:
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def load_business(ticker: str) -> dict:
+    return data.fetch_business(ticker)
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def load_insiders(ticker: str, n: int) -> pd.DataFrame:
     return data.fetch_insider_trades(ticker, n)
 

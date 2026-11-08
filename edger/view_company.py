@@ -9,7 +9,7 @@ import streamlit as st
 from . import charts, data, fmt, watchlist
 from .metrics import (DERIVED_LABELS, METRIC_BY_KEY, cagr, dividend_history, historical_per, turnaround, yoy,
                       yoy_prev)
-from .ui import (kpi_cards, metric_rows, load_dividends, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
+from .ui import (kpi_cards, load_business, metric_rows, load_dividends, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
                  load_profile, load_snapshot, load_statement, load_table, plot,
                  safe_markdown_text, theme_mode)
 
@@ -65,7 +65,8 @@ BUSINESS = {
     },
 }
 PER_SHARE_COLS = ("eps", "dps", "ffo_per_share")
-TABS = {"📈 재무": "fin", "💹 주가·가치": "val", "💰 배당": "div", "📄 공시": "filings", "👤 내부자": "ins"}
+TABS = {"📈 재무": "fin", "🏢 사업": "biz", "💹 가치": "val", "💰 배당": "div", "📄 공시": "filings",
+        "👤 내부자": "ins"}
 
 
 def _label(col: str) -> str:
@@ -130,6 +131,8 @@ def render(ticker: str) -> None:
                 _valuation(ticker, snap, annual, currency, mode, business)
             elif name == "div":
                 _dividends(ticker, snap, annual, currency, mode)
+            elif name == "biz":
+                _business(ticker, currency, mode)
             elif name == "filings":
                 _filings(ticker)
             else:
@@ -615,6 +618,70 @@ def _no_market_cap(snap: dict | None) -> None:
                   "무료 서버는 여러 앱이 같은 IP를 써서 Yahoo가 잠시 막는 경우가 많습니다.")
     st.info(f"시가총액을 계산할 수 없어 밸류에이션 지표를 표시하지 않습니다. {reason}")
     st.button("🔄 주가 다시 불러오기", key="retry_prices", on_click=retry_prices, width="stretch")
+
+
+# ---------------------------------------------------------------- 사업
+def _business(ticker: str, currency: str, mode: str) -> None:
+    with st.spinner("최근 연간 보고서(10-K·20-F)에서 사업 정보를 읽는 중… (처음엔 몇 초 걸립니다)"):
+        try:
+            biz = load_business(ticker)
+        except Exception as exc:
+            st.warning(f"사업 정보를 불러오지 못했습니다: {exc}")
+            return
+    source = f"{biz['form']} ({biz['date']})" if biz.get("form") else "연간 보고서 없음"
+
+    if biz.get("overview"):
+        st.markdown("**사업 개요** <span class='ed-meta'>연간 보고서 원문 첫 부분 (영문)</span>",
+                    unsafe_allow_html=True)
+        paras = biz["overview"].split("\n\n")
+        st.markdown(safe_markdown_text(paras[0]))
+        if len(paras) > 1:
+            with st.expander("더 읽기"):
+                st.markdown(safe_markdown_text("\n\n".join(paras[1:])))
+        st.caption("전체 내용은 📄 공시 탭의 '앱에서 읽기'에서 연간 보고서를 고르면 볼 수 있습니다.")
+
+    b = {k: v for k, v in (biz.get("breakdowns") or {}).items() if not k.startswith("_")}
+    if not b:
+        st.info("매출 구성 데이터가 없습니다. 연간 보고서 XBRL에 사업부문·제품·지역별 매출이 태그되지 않은 회사입니다 "
+                "(금융사·소형사에 흔함).")
+        st.caption(f"출처: {source}")
+        return
+
+    st.markdown("**매출 구성**", unsafe_allow_html=True)
+    titles = {v["title"]: k for k, v in b.items()}
+    pick = st.segmented_control("구분", list(titles), default=next(iter(titles)), key="biz_axis",
+                                label_visibility="collapsed") or next(iter(titles))
+    part = b[titles[pick]]
+    values, share, growth = part["values"], part["share"], part["growth"]
+    latest = values.columns[-1]
+    st.markdown(f"<span class='ed-meta'>FY{latest.year % 100:02d} · 비중은 전체 매출 대비</span>",
+                unsafe_allow_html=True)
+    plot(charts.share_bars(values[latest], share, mode, currency))
+
+    rows = []
+    op = part.get("op_income")
+    for name in values.index:
+        g = growth.get(name) if growth is not None else None
+        note = []
+        if op is not None and name in op.index and pd.notna(op.loc[name].iloc[-1]) and values.loc[name, latest]:
+            note.append(f"영업이익률 {op.loc[name].iloc[-1] / values.loc[name, latest] * 100:.1f}%")
+        rows.append({
+            "label": name, "value": fmt.money(values.loc[name, latest], currency),
+            "delta": None if g is None or pd.isna(g) else f"{g * 100:+.1f}% 전년 대비",
+            "tone": None if g is None or pd.isna(g) else ("good" if g >= 0 else "bad"),
+            "note": " · ".join([f"비중 {share.get(name, float('nan')) * 100:.1f}%", *note]),
+        })
+    metric_rows(rows)
+
+    if values.shape[1] >= 2:
+        st.markdown("**연도별 구성**", unsafe_allow_html=True)
+        plot(charts.mix_columns(values, mode, currency))
+    notes = []
+    if not part.get("exact"):
+        notes.append("회사가 공시한 항목의 합이 전체 매출과 맞지 않아 차액을 '기타(미분류)'로 표시했습니다 "
+                     "(부문 간 내부거래 제거·본사 항목 등).")
+    notes.append(f"출처: {source} XBRL. 부문·항목 이름은 회사가 공시한 영문 그대로입니다.")
+    st.caption(" ".join(notes))
 
 
 # ---------------------------------------------------------------- 배당

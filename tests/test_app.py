@@ -45,11 +45,11 @@ def test_company_view_renders():
         assert expected in text, expected
     for expected in ("재무 안정성", "분기말 기준", "총차입금", "부채비율", "D/E", "리스 포함", "유동비율", "이자보상배율"):
         assert expected in text, expected
-    assert len(at.tabs) == 5
+    assert len(at.tabs) == 6
 
 
 def test_valuation_tab():
-    at = run(tab="💹 주가·가치", t="DEMO")
+    at = run(tab="💹 가치", t="DEMO")
     text = page_text(at)
     assert "52주 최고" in text
     for expected in ("PER", "PBR", "EV/EBITDA", "EV/EBIT", "PEG", "EPS", "BPS", "1년 전 대비"):
@@ -147,3 +147,13 @@ def test_dividend_tab():
 def test_dividend_tab_non_payer():
     at = run(tab="💰 배당", t="DEMOB")
     assert any("배당 기록이 없습니다" in i.value for i in at.info)
+
+
+def test_business_tab():
+    at = run(tab="🏢 사업", t="DEMO")
+    assert not at.error
+    text = page_text(at)
+    for expected in ("사업 개요", "매출 구성", "Industrial Robots", "영업이익률", "연도별 구성"):
+        assert expected in text, expected
+    at.segmented_control(key="biz_axis").set_value("지역").run()
+    assert not at.exception and "United States" in page_text(at)

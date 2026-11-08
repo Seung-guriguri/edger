@@ -403,3 +403,32 @@ def period_table(ticker: str, period: str, n: int) -> tuple[pd.DataFrame, str]:
                 yt.attrs["per_share_ok"] = bool(y["per_share_ok"])
                 return yt, y["currency"]
     return table, currency
+
+
+# ---------------------------------------------------------------- business overview
+def fetch_business(ticker: str) -> dict:
+    """Business description and revenue breakdowns from the latest 10-K / 20-F.
+
+    {"form", "date", "url", "overview": str | None, "breakdowns": {...} (see business.breakdowns)}
+    """
+    from . import business
+
+    if is_demo(ticker):
+        return demo.business(ticker)
+    c = get_company(ticker)
+    filing = c.get_filings(form=["10-K", "20-F"]).latest()
+    if filing is None:
+        return {"form": None, "date": None, "url": None, "overview": None, "breakdowns": {}}
+    out = {"form": filing.form, "date": str(filing.filing_date), "url": filing.homepage_url,
+           "overview": None, "breakdowns": {}}
+    try:
+        out["breakdowns"] = business.breakdowns(filing.xbrl().facts.to_dataframe())
+    except Exception:
+        pass
+    try:
+        obj = filing.obj()
+        text = obj.business if filing.form.startswith("10-K") else obj.get("Item 4")
+        out["overview"] = business.overview(text)
+    except Exception:
+        pass
+    return out

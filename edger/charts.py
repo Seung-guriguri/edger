@@ -352,3 +352,50 @@ def _alpha(hex_color: str, a: float) -> str:
     h = hex_color.lstrip("#")
     r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
     return f"rgba({r},{g},{b},{a})"
+
+
+# ---------------------------------------------------------------- revenue mix
+def share_bars(latest: pd.Series, share: pd.Series, mode: str, currency: str = "USD") -> go.Figure:
+    """Horizontal bars, largest first, each labelled with amount and share."""
+    p = PALETTE[mode]
+    order = latest.sort_values(ascending=True)  # plotly draws bottom-up
+    div, suffix = fmt.scale_for(float(order.max() or 0))
+    labels = [f"{fmt.money(v, currency)} · {share.get(k, float('nan')) * 100:.0f}%" for k, v in order.items()]
+    names = [k if len(k) <= 22 else k[:21] + "…" for k in order.index]
+    fig = go.Figure(go.Bar(
+        y=names, x=order.values / div, orientation="h", marker_color=p["series"][0],
+        text=labels, textposition="outside", cliponaxis=False, constraintext="none",
+        textfont=dict(size=12, color=p["ink"]), customdata=list(order.index),
+        hovertemplate="%{customdata}<br><b>%{text}</b><extra></extra>",
+    ))
+    fig = _base(fig, mode, height=36 + 34 * len(order), legend=False, right=8)
+    fig.update_layout(margin=dict(t=6, r=96), bargap=0.32)
+    fig.update_xaxes(type="linear", showticklabels=False, showline=False, showgrid=False, zeroline=False)
+    fig.update_yaxes(type="category", gridcolor="rgba(0,0,0,0)", zeroline=False, tickfont=dict(size=12, color=p["ink"]))
+    return fig
+
+
+def mix_columns(values: pd.DataFrame, mode: str, currency: str = "USD", max_parts: int = 5) -> go.Figure:
+    """Stacked columns per fiscal year. Parts keep a fixed colour order (largest first) and
+    anything past ``max_parts`` folds into one grey "기타" block."""
+    p = PALETTE[mode]
+    v = values.copy()
+    if len(v) > max_parts:
+        head, tail = v.iloc[:max_parts - 1], v.iloc[max_parts - 1:]
+        v = pd.concat([head, pd.DataFrame([tail.sum()], index=[f"기타 {len(tail)}개"])])
+    years = [f"FY{c.year % 100:02d}" if hasattr(c, "year") else str(c) for c in v.columns]
+    div, suffix = fmt.scale_for(float(v.sum().max() or 0))
+    fig = go.Figure()
+    for i, (name, row) in enumerate(v.iterrows()):
+        color = p["series"][i] if not str(name).startswith("기타") else p["axis"]
+        fig.add_trace(go.Bar(
+            x=years, y=row.values / div, name=str(name)[:24], marker=dict(color=color,
+            line=dict(width=2, color=p["surface"])),  # 2px surface gap between stacked parts
+            customdata=[fmt.money(x, currency) for x in row.values],
+            hovertemplate=f"{str(name)[:30]} <b>%{{customdata}}</b><extra></extra>",
+        ))
+    fig = _base(fig, mode, height=280, legend=True)
+    fig.update_layout(barmode="stack", bargap=0.45, barcornerradius=0,
+                      legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0, traceorder="normal"))
+    fig.update_yaxes(ticksuffix=suffix, tickprefix="$" if currency == "USD" else "")
+    return fig

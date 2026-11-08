@@ -203,3 +203,43 @@ def filing_sections(form: str) -> list[dict]:
     if base == "10-Q":
         return [{"title": "경영진 분석 (MD&A)", "text": _LOREM * 6}]
     return [{"title": "본문", "text": _LOREM * 3}]
+
+
+def business(ticker: str = TICKER) -> dict:
+    """Synthetic segment / product / region breakdown in the shape of business.breakdowns()."""
+    ends = pd.to_datetime(["2023-12-31", "2024-12-31", "2025-12-31"])
+    totals = pd.Series([43.29e9, 51.59e9, 49.91e9], index=ends)
+
+    def block(title, shares, growth_tilt, op_margins=None):
+        rows = {}
+        for i, (name, share) in enumerate(shares.items()):
+            tilt = (1 + growth_tilt[i]) ** np.arange(-2, 1)
+            rows[name] = totals.values * share * tilt
+        values = pd.DataFrame(rows, index=ends).T
+        values = values * (totals / values.sum())  # keep the parts summing to the total
+        latest = ends[-1]
+        values = values.sort_values(latest, ascending=False)
+        op = None
+        if op_margins:
+            op = values.mul(pd.Series(op_margins), axis=0)
+        return {"title": title, "values": values, "share": values[latest] / totals[latest],
+                "growth": values[latest] / values[ends[-2]] - 1, "op_income": op, "exact": True}
+
+    return {
+        "form": "10-K", "date": "2026-02-10", "url": "https://www.sec.gov/",
+        "overview": ("Demo Robotics designs, manufactures and services industrial robots and the motion-control "
+                     "software that runs them. Customers are automotive, electronics and logistics manufacturers "
+                     "in more than 40 countries.\n\nThe company reports three segments: Industrial Robots, "
+                     "Software & Services, and Logistics Automation. Recurring software subscriptions and field "
+                     "services make up a growing share of revenue."),
+        "breakdowns": {
+            "_total": totals,
+            "segment": block("사업부문", {"Industrial Robots": 0.55, "Software & Services": 0.28,
+                                          "Logistics Automation": 0.17}, [0.02, 0.12, 0.06],
+                             {"Industrial Robots": 0.18, "Software & Services": 0.34, "Logistics Automation": 0.09}),
+            "product": block("제품·서비스", {"Robot arms": 0.41, "Controllers": 0.14, "Software subscriptions": 0.17,
+                                            "Field services": 0.11, "AGV systems": 0.17}, [0.01, 0.0, 0.15, 0.08, 0.06]),
+            "geo": block("지역", {"United States": 0.38, "China": 0.22, "Germany": 0.14, "Other countries": 0.26},
+                         [0.05, -0.04, 0.02, 0.06]),
+        },
+    }

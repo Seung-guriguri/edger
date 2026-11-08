@@ -430,3 +430,66 @@ def test_period_table_falls_back_to_yahoo(monkeypatch):
     t, _ = data.period_table("FRO", "ttm", 12)
     assert t["revenue"].iloc[-1] == 110 + 120 + 130 + 150  # last four quarters
     assert t["fcf"].iloc[-1] == (55 + 60 + 65 + 70) - 80
+
+
+def test_pick_members_prefers_detail_over_parents():
+    """AAPL-like: 'Products' sits next to its parts; the detailed set should win."""
+    from edger.business import pick_members
+    v = pd.Series({"Products": 355.5, "iPhone": 254.1, "Mac": 37.9, "iPad": 27.9, "Wearables": 35.6,
+                   "Services": 123.3})
+    members, exact = pick_members(v, 478.8)
+    assert exact and set(members) == {"iPhone", "Mac", "iPad", "Wearables", "Services"}
+
+
+def test_pick_members_partial_cover():
+    from edger.business import pick_members
+    members, exact = pick_members(pd.Series({"A": 50.0, "B": 30.0}), 100.0)
+    assert not exact and members == ["A", "B"]
+
+
+def _xbrl_fact(concept, value, end="2025-12-31", start="2025-01-01", **dims):
+    row = {"concept": concept, "numeric_value": value, "period_type": "duration", "period_start": start,
+           "period_end": end, "is_dimensioned": bool(dims), "dimension_member_label": None,
+           "dim_us-gaap_StatementBusinessSegmentsAxis": None, "dim_srt_ConsolidationItemsAxis": None,
+           "dim_srt_StatementGeographicalAxis": None}
+    for k, v in dims.items():
+        row[f"dim_{k}"] = v
+    return row
+
+
+def test_breakdowns_segments_with_operating_segments_marker():
+    """Segment facts tagged together with ConsolidationItemsAxis=OperatingSegmentsMember (AAPL)
+    count as single-axis; labels come from the member names, not 'Operating segments'."""
+    from edger.business import breakdowns
+    seg, cons = "us-gaap_StatementBusinessSegmentsAxis", "srt_ConsolidationItemsAxis"
+    rows = [_xbrl_fact("us-gaap:Revenues", 100.0)]
+    for member, value, opi in (("x:AmericasSegmentMember", 60.0, 20.0), ("x:EuropeSegmentMember", 40.0, 10.0)):
+        for concept, v in (("us-gaap:Revenues", value), ("us-gaap:OperatingIncomeLoss", opi)):
+            r = _xbrl_fact(concept, v, **{seg: member, cons: "us-gaap:OperatingSegmentsMember"})
+            r["dimension_member_label"] = "Operating segments"
+            rows.append(r)
+    b = breakdowns(pd.DataFrame(rows))
+    part = b["segment"]
+    assert list(part["values"].index) == ["Americas", "Europe"]
+    assert part["share"].tolist() == [0.6, 0.4] and part["exact"]
+    assert part["op_income"].loc["Americas"].iloc[-1] == 20.0
+
+
+def test_breakdowns_remainder_is_labelled():
+    from edger.business import breakdowns
+    geo = "srt_StatementGeographicalAxis"
+    rows = [_xbrl_fact("us-gaap:Revenues", 100.0),
+            _xbrl_fact("us-gaap:Revenues", 50.0, **{geo: "country:US"}),
+            _xbrl_fact("us-gaap:Revenues", 30.0, **{geo: "country:CN"})]
+    part = breakdowns(pd.DataFrame(rows))["geo"]
+    assert "기타(미분류)" in part["values"].index and not part["exact"]
+    assert part["share"].sum() == pytest.approx(1.0)
+
+
+def test_overview_reflows_wrapped_text():
+    from edger.business import overview
+    text = ("ITEM 4. INFORMATION ON THE COMPANY\n\nOur History and Structure\n\n"
+            "Our legal name is Example Co. We were founded in 1987 as a joint venture among the government and\n\n"
+            "other private investors and were incorporated in the country as a company limited by shares.\n")
+    out = overview(text)
+    assert out.startswith("Our legal name is Example Co.") and "government and other private" in out
