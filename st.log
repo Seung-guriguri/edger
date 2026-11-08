@@ -1,13 +1,10 @@
-
-Collecting usage statistics. To deactivate, set browser.gatherUsageStats to false.
-
-2026-11-08 13:09:09.500 Could not bind IPv6 wildcard address :::8501; falling back to 0.0.0.0:8501.
-2026-11-08 13:09:09.528 Uvicorn server started on 0.0.0.0:8501
+2026-11-08 13:56:13.598 Could not bind IPv6 wildcard address :::8501; falling back to 0.0.0.0:8501.
+2026-11-08 13:56:13.627 Uvicorn server started on 0.0.0.0:8501
 
   You can now view your Streamlit app in your browser.
 
   Local URL: http://localhost:8501
   Network URL: http://192.0.2.2:8501
-  External URL: http://34.27.6.50:8501
+  External URL: http://136.116.168.122:8501
 
   Stopping...

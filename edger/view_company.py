@@ -9,7 +9,7 @@ import streamlit as st
 from . import charts, data, fmt, watchlist
 from .metrics import (DERIVED_LABELS, METRIC_BY_KEY, cagr, dividend_history, historical_per, turnaround, yoy,
                       yoy_prev)
-from .ui import (kpi_cards, load_business, metric_rows, load_dividends, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
+from .ui import (kpi_cards, load_business, metric_rows, section, load_dividends, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
                  load_profile, load_snapshot, load_statement, load_table, plot,
                  safe_markdown_text, theme_mode)
 
@@ -65,8 +65,7 @@ BUSINESS = {
     },
 }
 PER_SHARE_COLS = ("eps", "dps", "ffo_per_share")
-TABS = {"📈 재무": "fin", "🏢 사업": "biz", "💹 가치": "val", "💰 배당": "div", "📄 공시": "filings",
-        "👤 내부자": "ins"}
+TABS = {"재무": "fin", "사업": "biz", "가치": "val", "배당": "div", "공시": "filings", "내부자": "ins"}
 
 
 def _label(col: str) -> str:
@@ -96,8 +95,11 @@ def render(ticker: str) -> None:
 
     # One basis for the cards and the 재무 tab. It lives outside the tabs so it keeps its
     # value while another tab is open (only the open tab's widgets exist).
+    section("실적", key="basis",
+                  info="**연간**: 회계연도 실적  \n**TTM**: 최근 4개 분기 합계 (계절성 없이 최신 추세)  \n"
+                       "**분기**: 단일 분기, 전년 같은 분기와 비교  \n\n아래 카드와 재무 탭이 이 기준을 따릅니다.")
     basis = st.segmented_control("기준", list(BASES), default="연간", key="period",
-                                 label_visibility="collapsed", help="연간: 회계연도 · TTM: 최근 4분기 합계 · 분기: 단일 분기") or "연간"
+                                 label_visibility="collapsed", width="stretch") or "연간"
     period_key = BASES[basis]
     if period_key == "annual":
         table = annual
@@ -173,14 +175,16 @@ def _header(ticker: str, profile: dict, snap: dict | None) -> None:
                       f'{chg_html}</div><div class="ed-hmeta">{html.escape(" · ".join(extra))}</div>')
 
     with st.container(key="head"):
-        left, right = st.columns([7, 1], vertical_alignment="top")
+        left, right = st.columns([5, 2], vertical_alignment="top")
         left.markdown(
             f'<div class="ed-hname">{html.escape(profile.get("name", ticker))}</div>'
             f'<div class="ed-hmeta">{html.escape(" · ".join(m for m in meta if m))}</div>{price_html}',
             unsafe_allow_html=True)
         starred = ticker in watchlist.load()
-        right.button("★" if starred else "☆", key="star", on_click=watchlist.toggle, args=(ticker,),
-                     type="tertiary", help="관심종목에서 빼기" if starred else "관심종목에 추가")
+        right.button("관심" if starred else "관심", key="star", on_click=watchlist.toggle, args=(ticker,),
+                     icon=":material/star:" if starred else ":material/star_border:",
+                     type="primary" if starred else "secondary", width="stretch",
+                     help="관심종목에서 빼기" if starred else "관심종목에 추가")
 
 
 def _kpis(snap: dict | None, table: pd.DataFrame, period: str, currency: str, business: str) -> None:
@@ -197,7 +201,7 @@ def _kpis(snap: dict | None, table: pd.DataFrame, period: str, currency: str, bu
         src = ""
         if table.attrs.get("source") == "Yahoo":
             src = f" · 출처 Yahoo Finance (최근 {table.attrs.get('quarters', '')}분기)"
-        st.markdown(f'<div class="ed-sub" style="margin-top:0.6rem">실적 <b>{html.escape(tag)}</b> · 증감은 {note}'
+        st.markdown(f'<div class="ed-sub" style="margin-top:0.6rem"><b>{html.escape(tag)}</b> 기준 · 증감은 {note}'
                     f'{html.escape(src)}</div>', unsafe_allow_html=True)
     stale = (snap or {}).get("stale_since")
     if stale is not None:
@@ -307,8 +311,12 @@ def _signals(ticker: str, snap: dict | None, table: pd.DataFrame, annual: pd.Dat
                              "note": f"순차입금/EBITDA {ratio:.1f}배 · 1배 미만 양호, 3배 초과 주의"})
 
     if rows:
-        st.markdown("**한눈에 보기** <span class='ed-meta'>규칙 기반 참고용, 투자 판단 아님</span>",
-                    unsafe_allow_html=True)
+        section("한눈에 보기", "참고용", key="signals",
+                info="정해진 규칙으로 판정합니다. 각 줄 아래에 쓰인 기준값을 확인하세요.  \n"
+                     "**밸류에이션**: 현재 PER을 이 회사의 과거 10년 PER 중앙값과 비교 (±20% 넘으면 비쌈/쌈)  \n"
+                     "**성장**: 매출(리츠는 FFO) 전년 대비, 10% 이상이면 성장  \n"
+                     "**수익성**: 영업이익률 변화 ±1%p (금융사는 ROE 수준)  \n"
+                     "**재무 안정성**: 순차입금/EBITDA 1배 미만 양호, 3배 초과 주의  \n\n투자 판단의 근거가 아닙니다.")
         metric_rows(rows)
 
 
@@ -322,65 +330,72 @@ def _financials(ticker: str, table: pd.DataFrame, annual: pd.DataFrame, period_k
         else:
             st.info("이 회사는 XBRL 재무 데이터가 없습니다 (펀드, 신규 상장사 등).")
         return
+    notes = []
     if period_key == "ttm":
-        st.caption("TTM = 각 분기 시점의 최근 4분기 합계. 계절성 없이 추세를 볼 수 있습니다.")
+        notes.append("TTM = 각 분기 시점의 최근 4분기 합계.")
     if table.attrs.get("source") == "Yahoo":
-        per_share = "" if table.attrs.get("per_share_ok") else (
-            " EPS·주식수는 ADR(주식 여러 주를 묶은 미국 상장 증권) 단위와 섞여 있어 표시하지 않습니다.")
-        st.caption(f"ℹ️ SEC에 분기 재무 데이터가 없어 Yahoo Finance의 최근 {table.attrs.get('quarters', '')}개 분기로 "
-                   f"보여줍니다(SEC 원문이 아닌 Yahoo 가공 데이터). 분기가 적어 전년 대비 비교는 일부만 됩니다.{per_share}")
-
+        per_share = "" if table.attrs.get("per_share_ok") else " EPS·주식수는 ADR 단위와 섞여 표시하지 않습니다."
+        notes.append(f"SEC에 분기 데이터가 없어 Yahoo Finance 최근 {table.attrs.get('quarters', '')}개 분기로 "
+                     f"보여줍니다.{per_share}")
     cfg = BUSINESS[business]
     if cfg.get("note"):
-        st.caption(f"🏷️ {cfg['name']} · {cfg['note']}")
-    choices = {k: v for k, v in cfg["pills"].items() if table[v].notna().any()}
-    pick = st.pills("지표", list(choices), default=next(iter(choices)), key="metric_pick",
-                    label_visibility="collapsed") or next(iter(choices))
-    col = choices[pick]
-    unit_note = "주" if col == "shares_diluted" else currency
-    st.markdown(f"**{html.escape(pick)}** <span class='ed-meta'>({unit_note})</span>", unsafe_allow_html=True)
-    plot(charts.bar_series(table.dropna(subset=[col]), col, mode,
-                           "" if col == "shares_diluted" else currency, per_share=(col in PER_SHARE_COLS)))
-    if col == "shares_diluted":
-        st.caption("가중평균 희석주식수. 줄어들면 자사주 매입, 늘어나면 주식 발행·보상 효과입니다.")
+        notes.append(f"{cfg['name']}: {cfg['note']}")
+    if notes:
+        st.caption("ℹ️ " + " ".join(notes))
 
-    margins = {k: v for k, v in cfg["margins"].items() if table[k].notna().any()}
-    if margins:
-        st.markdown("**마진**" if business != "bank" else "**효율성·이익률**")
-        plot(charts.margin_lines(table, margins, mode))
-
-    if period_key != "quarterly" and table[["roe", "roic"]].notna().any().any():
-        st.markdown("**자본 수익률**")
-        # ROIC needs operating income and debt in the industrial sense: not for financials.
-        returns = {"roe": "ROE", "roa": "ROA"} if business != "general" else {"roe": "ROE", "roic": "ROIC", "roa": "ROA"}
-        plot(charts.margin_lines(table, returns, mode))
-        st.caption("ROE = 순이익 ÷ 평균 자본. ROIC = 세후 영업이익 ÷ 평균 투하자본(자본 + 차입금 − 현금), "
-                   "세율은 실효세율(없으면 21%). ROA = 순이익 ÷ 평균 총자산.")
-
-    _growth(table, period_key, cfg["growth"])
-
-    _stability(ticker, annual, currency, business)
-
-    if period_key == "ttm":
-        st.markdown("**전체 재무제표**")
-        st.caption("전체 재무제표는 공시 단위(연간·분기)로만 볼 수 있습니다. 위에서 연간 또는 분기를 선택하세요.")
-    else:
-        _statements(ticker, period_key, currency)
-
-    with st.expander("요약 표로 보기"):
-        view = pd.DataFrame({"기간": table["label"]})
-        names = {v: k for k, v in cfg["pills"].items()}
-        for c in cfg["summary"]:
-            view[names.get(c, _label(c))] = [fmt.money(v, currency) for v in table[c]]
-        if business == "general":
-            view["영업이익률"] = [fmt.pct(v) for v in table["operating_margin"]]
-        view["EPS"] = [fmt.per_share(v, currency) for v in table["eps"]]
-        if period_key != "quarterly":
-            view["ROE"] = [fmt.pct(v) for v in table["roe"]]
+    view = st.segmented_control("재무 보기", FIN_VIEWS, default=FIN_VIEWS[0], key="fin_view",
+                                label_visibility="collapsed", width="stretch") or FIN_VIEWS[0]
+    if view == "실적":
+        choices = {k: v for k, v in cfg["pills"].items() if table[v].notna().any()}
+        pick = st.pills("지표", list(choices), default=next(iter(choices)), key="metric_pick",
+                        label_visibility="collapsed") or next(iter(choices))
+        col = choices[pick]
+        unit_note = "주" if col == "shares_diluted" else currency
+        section(pick, f"({unit_note})",
+                info="가중평균 희석주식수입니다. 줄면 자사주 매입, 늘면 주식 발행·보상 효과입니다."
+                if col == "shares_diluted" else None, key="metric")
+        plot(charts.bar_series(table.dropna(subset=[col]), col, mode,
+                               "" if col == "shares_diluted" else currency, per_share=(col in PER_SHARE_COLS)))
+        _growth(table, period_key, cfg["growth"])
+        with st.expander("요약 표로 보기"):
+            view_df = pd.DataFrame({"기간": table["label"]})
+            names = {v: k for k, v in cfg["pills"].items()}
+            for c in cfg["summary"]:
+                view_df[names.get(c, _label(c))] = [fmt.money(v, currency) for v in table[c]]
             if business == "general":
-                view["ROIC"] = [fmt.pct(v) for v in table["roic"]]
-        st.dataframe(view.iloc[::-1], hide_index=True, width="stretch")
-    st.caption("XBRL 원천 데이터 기준. 분기 4Q와 분기 현금흐름은 누적치 차감으로 계산했습니다.")
+                view_df["영업이익률"] = [fmt.pct(v) for v in table["operating_margin"]]
+            view_df["EPS"] = [fmt.per_share(v, currency) for v in table["eps"]]
+            if period_key != "quarterly":
+                view_df["ROE"] = [fmt.pct(v) for v in table["roe"]]
+                if business == "general":
+                    view_df["ROIC"] = [fmt.pct(v) for v in table["roic"]]
+            st.dataframe(view_df.iloc[::-1], hide_index=True, width="stretch")
+    elif view == "수익성":
+        margins = {k: v for k, v in cfg["margins"].items() if table[k].notna().any()}
+        if margins:
+            section("마진" if business != "bank" else "효율성·이익률",
+                    info="각 이익 ÷ 매출. EBITDA = 영업이익 + 감가상각비. 효율성 비율(은행) = 비이자비용 ÷ "
+                         "순영업수익으로, 낮을수록 좋습니다.", key="margins")
+            plot(charts.margin_lines(table, margins, mode))
+        if period_key != "quarterly" and table[["roe", "roic"]].notna().any().any():
+            section("자본 수익률", info="**ROE** = 순이익 ÷ 평균 자본  \n**ROIC** = 세후 영업이익 ÷ 평균 투하자본"
+                    "(자본 + 차입금 − 현금), 세율은 실효세율(없으면 21%)  \n**ROA** = 순이익 ÷ 평균 총자산",
+                    key="returns")
+            # ROIC needs operating income and debt in the industrial sense: not for financials.
+            returns = {"roe": "ROE", "roa": "ROA"} if business != "general" else {"roe": "ROE", "roic": "ROIC", "roa": "ROA"}
+            plot(charts.margin_lines(table, returns, mode))
+        elif period_key == "quarterly":
+            st.caption("자본 수익률은 1년치 실적이 필요해 연간·TTM 기준에서 보여줍니다.")
+    elif view == "안정성":
+        _stability(ticker, annual, currency, business)
+    else:
+        if period_key == "ttm":
+            st.info("전체 재무제표는 공시 단위(연간·분기)로만 있습니다. 위 '실적'에서 연간 또는 분기를 선택하세요.")
+        else:
+            _statements(ticker, period_key, currency)
+
+
+FIN_VIEWS = ["실적", "수익성", "안정성", "재무제표"]
 
 
 def business_kind(profile: dict) -> str:
@@ -457,8 +472,10 @@ def _stability(ticker: str, annual: pd.DataFrame, currency: str, business: str) 
                  if pd.notna(net) and net > 0 else ("순현금" if pd.notna(net) else "–"),
                  "note": f"빚을 몇 년 치 영업현금으로 갚는지 · {fl_tag} · 3배 넘으면 부담"},
             ]
-    st.markdown(f"**재무 안정성** <span class='ed-meta'>{html.escape(bs_tag)} 기준</span>",
-                unsafe_allow_html=True)
+    section("재무 안정성", f"{bs_tag} 기준", key="stability",
+            info="재무상태는 **최근 분기말**, 이자·EBITDA처럼 1년치가 필요한 값은 **최근 4분기(TTM)** 기준입니다. "
+                 "위의 연간/TTM/분기 선택과 상관없이 다른 앱들처럼 최신 시점으로 봅니다.  \n\n"
+                 "**부채비율**은 영업부채까지 포함한 한국식, **D/E**는 이자 붙는 빚만 보는 미국식입니다.")
     metric_rows(rows)
     if negative_equity:
         st.caption("자본이 마이너스입니다(자사주 매입·배당이 누적 이익보다 많은 경우 흔함). "
@@ -478,13 +495,12 @@ def _growth(table: pd.DataFrame, period_key: str, cols: list[str]) -> None:
         if period_key != "quarterly":  # multi-year growth of single quarters is mostly noise
             row["3년 CAGR"] = fmt.pct(cagr(table, col, 3, rows_per_year=rpy), signed=True)
         rows.append(row)
-    st.markdown("**성장률**")
+    section("성장률", key="growth", info="CAGR = 연평균 성장률. 시작이나 끝 값이 음수(적자)면 계산하지 않습니다(–). "
+            "흑자↔적자로 바뀌면 %% 대신 적자전환·흑자전환으로 표시합니다.".replace("%%", "%"))
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-    st.caption("CAGR = 연평균 성장률. 시작·끝 값이 음수(적자)면 계산하지 않습니다(–).")
 
 
 def _statements(ticker: str, period: str, currency: str) -> None:
-    st.markdown("**전체 재무제표**")
     kinds = {"손익계산서": "income", "재무상태표": "balance", "현금흐름표": "cashflow"}
     pick = st.segmented_control("재무제표", list(kinds), default="손익계산서", key="stmt_kind",
                                 label_visibility="collapsed") or "손익계산서"
@@ -508,16 +524,19 @@ def _statements(ticker: str, period: str, currency: str) -> None:
             return fmt.number(v) + "주"
         return fmt.money(v, currency)
 
-    rows = []
+    # A plain HTML table: item names wrap instead of being cut off, and there is no nested
+    # scroll area inside the page (the old data grid truncated "Selling, general and a…").
+    head = "".join(f"<th>{html.escape(str(c))}</th>" for c in value_cols)
+    body = []
     for rec in df.to_dict("records"):  # not itertuples: period names like "25.09" get mangled
-        label = ("\u2003" * max(int(rec["depth"]), 0)) + rec["label"]
-        if rec["is_abstract"]:
-            label = f"▸ {label}"
-        rows.append({"항목": label, **{c: cell(rec[c], rec["kind"]) for c in value_cols}})
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
-                 height=min(38 + 35 * len(rows), 560),
-                 column_config={"항목": st.column_config.TextColumn(width="medium")})
-    st.caption(f"출처: {res['source']}. 최근 {len(value_cols)}개 기간. 표를 옆으로 밀면 다른 기간이 보입니다.")
+        depth = max(int(rec["depth"]), 0)
+        cls = ' class="ed-st-sec"' if rec["is_abstract"] else ""
+        cells = "".join(f"<td>{html.escape(cell(rec[c], rec['kind']))}</td>" for c in value_cols)
+        body.append(f'<tr{cls}><th style="padding-left:{0.1 + depth * 0.6:.1f}rem">'
+                    f'{html.escape(str(rec["label"]))}</th>{cells}</tr>')
+    st.markdown(f'<div class="ed-st-wrap"><table class="ed-st"><thead><tr><th></th>{head}</tr></thead>'
+                f'<tbody>{"".join(body)}</tbody></table></div>', unsafe_allow_html=True)
+    st.caption(f"출처: {res['source']} · 최근 {len(value_cols)}개 기간")
 
 
 # ---------------------------------------------------------------- 주가·가치
@@ -531,12 +550,14 @@ def _valuation(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: s
         st.info("주가 차트를 불러오지 못했습니다 (Yahoo Finance·Stooq 모두 응답 없음, 또는 비상장·외국 종목). "
                 "재무·공시 탭은 정상적으로 볼 수 있습니다.")
     else:
-        rng = st.segmented_control("기간", list(_RANGES), default="1년", key="price_range",
-                                   label_visibility="collapsed") or "1년"
+        # Header first (it shows the change over the chosen range), then the range control.
+        rng = st.session_state.get("price_range") or "1년"
         shown = prices[prices.index >= prices.index[-1] - pd.DateOffset(years=_RANGES[rng])]
         first, last = float(shown.iloc[0]), float(shown.iloc[-1])
-        st.markdown(f"**주가** <span class='ed-meta'>{rng} {fmt.pct(last / first - 1, signed=True)}</span>",
-                    unsafe_allow_html=True)
+        section("주가", f"{rng} {fmt.pct(last / first - 1, signed=True)}", key="price",
+                info="종가 기준. 주가는 Yahoo Finance(실패하면 Stooq)에서 15분마다 갱신합니다.")
+        st.segmented_control("기간", list(_RANGES), default="1년", key="price_range",
+                             label_visibility="collapsed", width="stretch")
         plot(charts.price_line(shown, mode))
         year = prices[prices.index >= prices.index[-1] - pd.DateOffset(years=1)]
         hi, lo = float(year.max()), float(year.min())
@@ -551,8 +572,9 @@ def _valuation(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: s
     v, flows = snap["valuation"], snap["ttm"] or {}
     basis = flows.get("label", "")
     stale = " · ⚠️ 오래된 실적" if snap.get("stale_since") is not None else ""
-    st.markdown(f"**밸류에이션** <span class='ed-meta'>{html.escape(basis)} 기준{stale}</span>",
-                unsafe_allow_html=True)
+    section("밸류에이션", f"{basis} 기준{stale}", key="valuation",
+            info="실적은 최근 4분기 합계(TTM)를 씁니다. 분기 데이터가 부족하면 최근 회계연도로 대신합니다.  \n"
+                 "실적은 SEC 공시 기준이라 실적 발표 직후엔 며칠 시차가 있을 수 있습니다.")
 
     def mult(x):
         return f"{x:.1f}배" if x is not None and pd.notna(x) else "–"
@@ -585,7 +607,7 @@ def _valuation(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: s
     if business in ("bank", "insurance"):
         st.caption("금융사는 매출·현금흐름·EV 기반 지표가 의미가 없어 PER·PBR 위주로 봅니다.")
 
-    st.markdown("**주당 지표**")
+    section("주당 지표", key="pershare")
     eps_delta = fmt.pct(v["eps_growth"], 1, signed=True) + " (1년 전 대비)" if v["eps_growth"] is not None else None
     metric_rows([
         {"label": "EPS", "value": fmt.per_share(v["eps"], currency), "note": "희석 주당순이익 · 최근 4분기 합",
@@ -600,13 +622,11 @@ def _valuation(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: s
     # Per-share history mixes ADR prices with ordinary-share EPS for foreign filers: skip.
     per = historical_per(annual, prices) if not snap.get("fx") else pd.DataFrame()
     if not per.empty and per["per"].notna().sum() >= 2:
-        st.markdown("**연도별 PER** <span class='ed-meta'>회계연도 말 주가 ÷ 희석 EPS</span>",
-                    unsafe_allow_html=True)
+        section("연도별 PER", key="perhist", info="회계연도 말 종가 ÷ 그해 희석 EPS. 가로선은 현재 PER입니다.")
         plot(charts.per_bars(per, mode, current=v["per"]))
         hist = per["per"].dropna()
         if v["per"]:
             st.caption(f"과거 {len(hist)}년 PER 중앙값 {hist.median():.1f}배 · 현재 {v['per']:.1f}배")
-    st.caption("주가는 Yahoo Finance(15분 캐시), 실적은 SEC 공시 기준이라 발표 직후엔 시차가 있을 수 있습니다.")
 
 
 def _no_market_cap(snap: dict | None) -> None:
@@ -631,14 +651,14 @@ def _business(ticker: str, currency: str, mode: str) -> None:
     source = f"{biz['form']} ({biz['date']})" if biz.get("form") else "연간 보고서 없음"
 
     if biz.get("overview"):
-        st.markdown("**사업 개요** <span class='ed-meta'>연간 보고서 원문 첫 부분 (영문)</span>",
-                    unsafe_allow_html=True)
+        section("사업 개요", "영문 원문", key="overview",
+                info="최근 연간 보고서(10-K의 Item 1, 20-F의 Item 4) 첫 부분입니다. 전체 내용은 공시 탭의 "
+                     "'앱에서 읽기'에서 연간 보고서를 고르면 볼 수 있습니다.")
         paras = biz["overview"].split("\n\n")
         st.markdown(safe_markdown_text(paras[0]))
         if len(paras) > 1:
             with st.expander("더 읽기"):
                 st.markdown(safe_markdown_text("\n\n".join(paras[1:])))
-        st.caption("전체 내용은 📄 공시 탭의 '앱에서 읽기'에서 연간 보고서를 고르면 볼 수 있습니다.")
 
     b = {k: v for k, v in (biz.get("breakdowns") or {}).items() if not k.startswith("_")}
     if not b:
@@ -647,7 +667,9 @@ def _business(ticker: str, currency: str, mode: str) -> None:
         st.caption(f"출처: {source}")
         return
 
-    st.markdown("**매출 구성**", unsafe_allow_html=True)
+    section("매출 구성", source, key="mix",
+            info="연간 보고서 XBRL에 회사가 공시한 구분 그대로입니다(영문). 합계와 세부 항목이 함께 공시되면 "
+                 "합이 전체 매출과 맞는 가장 자세한 조합을 고르고, 맞지 않는 차액은 '기타(미분류)'로 따로 둡니다.")
     titles = {v["title"]: k for k, v in b.items()}
     pick = st.segmented_control("구분", list(titles), default=next(iter(titles)), key="biz_axis",
                                 label_visibility="collapsed") or next(iter(titles))
@@ -674,14 +696,10 @@ def _business(ticker: str, currency: str, mode: str) -> None:
     metric_rows(rows)
 
     if values.shape[1] >= 2:
-        st.markdown("**연도별 구성**", unsafe_allow_html=True)
+        section("연도별 구성", key="mixyears")
         plot(charts.mix_columns(values, mode, currency))
-    notes = []
     if not part.get("exact"):
-        notes.append("회사가 공시한 항목의 합이 전체 매출과 맞지 않아 차액을 '기타(미분류)'로 표시했습니다 "
-                     "(부문 간 내부거래 제거·본사 항목 등).")
-    notes.append(f"출처: {source} XBRL. 부문·항목 이름은 회사가 공시한 영문 그대로입니다.")
-    st.caption(" ".join(notes))
+        st.caption("항목 합이 전체 매출과 달라 차액을 '기타(미분류)'로 표시했습니다 (부문 간 내부거래 제거 등).")
 
 
 # ---------------------------------------------------------------- 배당
@@ -701,16 +719,14 @@ def _dividends(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: s
         view = st.segmented_control("배당 보기", ["연도별", "회차별"], default="연도별", key="div_view",
                                     label_visibility="collapsed") or "연도별"
         if view == "연도별":
-            st.markdown("**연도별 주당배당금** <span class='ed-meta'>흐린 막대 = 올해(진행 중)</span>",
-                        unsafe_allow_html=True)
+            section("연도별 주당배당금", "흐린 막대 = 올해", key="divyears",
+                    info="Yahoo Finance 배당 내역(액면분할 반영)을 배당락일 기준 달력 연도로 합한 값입니다.")
             plot(charts.dividend_bars(yearly, mode, currency))
         else:
-            st.markdown("**회차별 배당** <span class='ed-meta'>배당락일 기준, 최근 10년</span>",
-                        unsafe_allow_html=True)
+            section("회차별 배당", "최근 10년", key="divpay", info="배당락일 기준 1회 배당금입니다.")
             plot(charts.dividend_payments(hist["payments"], mode, currency))
         if yearly["yield"].notna().sum() >= 2:
-            st.markdown("**연도별 배당수익률** <span class='ed-meta'>연간 배당 ÷ 연말 주가, * = 최근 12개월</span>",
-                        unsafe_allow_html=True)
+            section("연도별 배당수익률", key="divyield", info="연간 배당 ÷ 연말 주가. 올해(*)는 최근 12개월 배당 ÷ 현재 주가.")
             plot(charts.dividend_yield_line(yearly, mode))
         with st.expander("표로 보기"):
             table = pd.DataFrame({
@@ -721,7 +737,6 @@ def _dividends(ticker: str, snap: dict | None, annual: pd.DataFrame, currency: s
                 "배당수익률": [fmt.pct(v, 2) for v in yearly["yield"]],
             }).iloc[::-1]
             st.dataframe(table, hide_index=True, width="stretch")
-        st.caption("출처: Yahoo Finance 배당 내역 (액면분할 반영). 연도는 배당락일 기준 달력 연도입니다.")
     elif ok:
         st.info("배당 기록이 없습니다. 배당을 지급하지 않는 회사입니다 (자사주 매입으로 환원하는 경우는 아래 참고).")
     else:
@@ -760,7 +775,7 @@ def _dividends_from_sec(annual: pd.DataFrame, currency: str, mode: str) -> None:
         st.caption("SEC 공시에도 주당배당금 항목이 없습니다.")
         st.button("🔄 다시 불러오기", key="retry_div", on_click=retry_prices, width="stretch")
         return
-    st.markdown("**회계연도별 주당배당금** <span class='ed-meta'>SEC 공시 기준</span>", unsafe_allow_html=True)
+    section("회계연도별 주당배당금", "SEC 공시 기준", key="divsec")
     plot(charts.bar_series(annual.dropna(subset=["dps"]), "dps", mode, currency, per_share=True))
     st.button("🔄 Yahoo에서 다시 불러오기", key="retry_div", on_click=retry_prices, width="stretch")
 
@@ -769,8 +784,8 @@ def _shareholder_returns(snap: dict | None) -> None:
     if not snap or not snap.get("market_cap"):
         return
     v = snap["valuation"]
-    st.markdown(f"**주주환원** <span class='ed-meta'>{html.escape((snap['ttm'] or {}).get('label', ''))} 기준</span>",
-                unsafe_allow_html=True)
+    section("주주환원", f"{(snap['ttm'] or {}).get('label', '')} 기준", key="returns_sh",
+            info="SEC 현금흐름표의 배당금 지급액·자사주 매입액 기준입니다.")
     flows = snap["ttm"] or {}
     currency = snap.get("currency", "USD")
     metric_rows([
@@ -803,7 +818,7 @@ def _filings(ticker: str) -> None:
 
     _reader(ticker, filings)
 
-    st.markdown("**공시 목록** <span class='ed-meta'>탭하면 SEC 원문</span>", unsafe_allow_html=True)
+    section("공시 목록", "탭하면 SEC 원문", key="filings")
     group = st.pills("종류", ["전체", *FORM_GROUPS], default="전체", key="form_group",
                      label_visibility="collapsed") or "전체"
     shown = filings if group == "전체" else filings[filings["form"].isin(FORM_GROUPS[group])]
@@ -828,7 +843,7 @@ def _reader(ticker: str, filings: pd.DataFrame) -> None:
     readable = filings[filings["form"].str.replace("/A", "", regex=False).isin(data.READABLE_FORMS)].head(40)
     if readable.empty:
         return
-    st.markdown("**📖 앱에서 읽기**")
+    section("앱에서 읽기", key="reader", info="10-K·10-Q·20-F는 사업 개요·리스크 요인·MD&A, 8-K는 항목별 내용과 보도자료를 보여줍니다.")
     options = list(readable.index)
     pick = st.selectbox(
         "읽을 공시", options, index=None, key="reader_pick", label_visibility="collapsed",
@@ -881,7 +896,7 @@ def _insiders(ticker: str, mode: str) -> None:
          "note": "시장에서 판 금액 (코드 S) · 보상으로 받은 주식 매도가 많아 매수보다 흔함"},
     ])
     if not market.empty:
-        st.markdown("**월별 장내 매매**")
+        section("월별 장내 매매", key="insmonth", info="Form 4의 장내 매수(P)·매도(S) 금액을 월별로 합했습니다.")
         plot(charts.insider_monthly(market, mode))
 
     only_market = st.toggle("장내 매매(P/S)만 보기", value=False)

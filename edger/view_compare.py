@@ -6,7 +6,7 @@ import streamlit as st
 
 from . import charts, fmt, watchlist
 from .metrics import change
-from .ui import load_profile, load_snapshot, plot, theme_mode
+from .ui import load_profile, load_snapshot, plot, section, theme_mode
 
 MAX_COMPARE = 5
 
@@ -90,7 +90,10 @@ def _table(snaps: dict) -> None:
             "영업이익률": fmt.pct(om.iloc[-1]) if len(om) else "–",
             "ROE": fmt.pct(roe.iloc[-1]) if len(roe) else "–",
         })
-    st.markdown("**관심종목** <span class='ed-meta'>행을 누르면 종목 화면으로</span>", unsafe_allow_html=True)
+    section("관심종목", "행을 누르면 종목 화면으로", key="wl",
+            info="매출↑ = 최근 회계연도 매출 증가율. PER·EV/EBITDA·EPS = 최근 4분기 기준. "
+                 "⚠ = SEC 실적이 오래돼 PER이 부정확할 수 있음. EPS는 회사 보고 통화 기준.  \n"
+                 "관심종목은 이 기기의 브라우저에 저장됩니다.")
     event = st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
                          on_select="rerun", selection_mode="single-row", key="wl_table")
     sel = event.selection.rows if event and event.selection else []
@@ -98,8 +101,7 @@ def _table(snaps: dict) -> None:
         _open_company(rows[sel[0]]["티커"])
         del st.session_state["wl_table"]  # otherwise coming back would jump straight away again
         st.rerun()
-    st.caption("매출↑ = 최근 회계연도 매출 증가율. PER·EV/EBITDA·EPS = 최근 4분기 기준. "
-               "⚠ = SEC 실적이 오래돼 PER이 부정확할 수 있음. EPS는 회사 보고 통화 기준.")
+
 
 
 def _compare(snaps: dict) -> None:
@@ -107,7 +109,7 @@ def _compare(snaps: dict) -> None:
     if len(tickers) < 2:
         st.caption("관심종목이 2개 이상이면 비교 차트가 나타납니다.")
         return
-    st.markdown("**비교**")
+    section("비교", "최대 5개", key="cmp", info="회계연도 기준이라 결산월이 다른 회사는 시기가 조금 어긋납니다.")
     chosen = st.multiselect("비교할 종목", tickers, default=tickers[:3], max_selections=MAX_COMPARE,
                             key="cmp_pick", label_visibility="collapsed",
                             placeholder=f"비교할 종목 선택 (최대 {MAX_COMPARE}개)")
@@ -135,4 +137,4 @@ def _compare(snaps: dict) -> None:
             names.append(f"**{t}** {load_profile(t).get('name', '')}")
         except Exception:
             names.append(f"**{t}**")
-    st.caption(" · ".join(names) + ". 회계연도 기준이라 결산월이 다른 회사는 시기가 조금 어긋납니다.")
+    st.caption(" · ".join(names))

@@ -15,55 +15,91 @@ PRICE_TTL = 60 * 15
 
 CSS = """
 <style>
+/* ---- tokens: muted text is the body text at reduced opacity, so it keeps >= 4.5:1
+   contrast in both themes (the old fixed grey was ~3.4:1 on white). Status colours get a
+   darker step in light mode for the same reason, and always come with words. */
+:root {--ed-good: #0a7d0a; --ed-bad: #c62f2f; --ed-warn: #9a6200; --ed-line: rgba(128,128,128,0.22);}
+@media (prefers-color-scheme: dark) {
+  :root {--ed-good: #2fbf2f; --ed-bad: #ef6b6b; --ed-warn: #e0a326;}
+}
 .block-container {padding-top: 3.2rem; padding-bottom: 3rem; padding-left: 1rem; padding-right: 1rem; max-width: 760px;}
 header[data-testid="stHeader"] {height: 0; background: transparent;}
-h1 {font-size: 1.5rem !important; margin-bottom: 0 !important;}
 h3 {font-size: 1.2rem !important; padding-bottom: 0 !important;}
-[data-testid="stMetric"] {padding: 0.55rem 0.7rem;}
-[data-testid="stMetricValue"] {font-size: 1.2rem;}
-[data-testid="stMetricLabel"] p {font-size: 0.8rem;}
-/* Larger tap targets for tabs; let 4 tabs fit on a phone */
-button[data-baseweb="tab"] {padding: 0.6rem 0.7rem; font-size: 0.95rem;}
-.ed-sub {color: #8a8984; font-size: 0.85rem; margin: 0.1rem 0 0.6rem;}
+/* tabs: text only, bigger tap target, all six fit on a 390px phone */
+button[data-baseweb="tab"] {padding: 0.65rem 0.55rem; font-size: 0.95rem;}
+button[data-baseweb="tab"][aria-selected="true"] p {font-weight: 700;}
+/* pills / segmented controls: at least 36px tall for thumbs */
+[data-testid="stButtonGroup"] button {min-height: 2.25rem;}
+.ed-sub, .ed-meta, .ed-desc, .ed-hmeta, .ed-kl, .ed-rn, .ed-other {color: inherit; opacity: 0.68;}
+.ed-sub {font-size: 0.85rem; margin: 0.1rem 0 0.6rem;}
+.ed-meta {font-size: 0.8rem; white-space: nowrap; font-weight: 400;}
 .ed-list {list-style: none; padding: 0; margin: 0;}
-.ed-list li {margin: 0 !important; padding: 0.65rem 0.1rem; border-bottom: 1px solid rgba(128,128,128,0.18);}
+.ed-list li {margin: 0 !important; padding: 0.7rem 0.1rem; border-bottom: 1px solid var(--ed-line);}
 .ed-list a {text-decoration: none; color: inherit; display: block;}
 .ed-row {display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem;}
 .ed-title {font-weight: 600; font-size: 0.95rem;}
-.ed-meta {color: #8a8984; font-size: 0.8rem; white-space: nowrap;}
-.ed-desc {color: #8a8984; font-size: 0.82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;}
+.ed-desc {font-size: 0.82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;}
 .ed-badge {display: inline-block; font-size: 0.72rem; font-weight: 600; padding: 0.05rem 0.45rem; border-radius: 999px;
-           border: 1px solid currentColor; margin-right: 0.35rem;}
-.ed-buy {color: #2a78d6;} .ed-sell {color: #e34948;} .ed-other {color: #8a8984;}
+           border: 1px solid currentColor; margin-right: 0.35rem; opacity: 1;}
+.ed-buy {color: #2a78d6;} .ed-sell {color: var(--ed-bad);}
 /* filing reader: keep headings inside the text from shouting on a phone */
 [data-testid="stExpander"] h1, [data-testid="stExpander"] h2 {font-size: 1.1rem !important;}
 [data-testid="stExpander"] h3, [data-testid="stExpander"] h4 {font-size: 1rem !important;}
-.ed-app {font-size: 1.05rem; margin-bottom: 0.4rem;}
+/* top bar: brand and view switch on one row */
+.st-key-topbar [data-testid="stHorizontalBlock"] {flex-wrap: nowrap !important; gap: 0.5rem;}
+.st-key-topbar [data-testid="stColumn"] {min-width: 0 !important;}
+.ed-app {font-size: 1.05rem; white-space: nowrap;}
+/* section header: title + optional basis/meta on the left, control or info on the right */
+.st-key-sechead [data-testid="stHorizontalBlock"], [class*="st-key-sec_"] [data-testid="stHorizontalBlock"]
+  {flex-wrap: nowrap !important; align-items: center;}
+[class*="st-key-sec_"] [data-testid="stColumn"] {min-width: 0 !important;}
+.ed-h {font-size: 1.05rem; font-weight: 700; margin: 0.9rem 0 0.2rem;}
+[class*="st-key-sec_"] {margin-top: 0.7rem;}
+[class*="st-key-sec_"] .ed-h {margin: 0;}
+[class*="st-key-sec_"] [data-testid="stPopover"] button {min-height: 2.2rem; padding: 0 0.5rem;}
+/* no dropdown caret: it is an info button */
+[class*="st-key-sec_"] [data-testid="stPopover"] button [data-testid="stIconMaterial"],
+[class*="st-key-sec_"] [data-testid="stPopover"] button svg {display: none;}
+/* Korean: break between words, not inside them ("9월 결 / 산") */
+.ed-hmeta, .ed-sub, .ed-rn, .ed-rl, .ed-welcome, .ed-st tbody th {word-break: keep-all; overflow-wrap: anywhere;}
 /* company header */
 .ed-hname {font-size: 1.2rem; font-weight: 700; line-height: 1.25;}
-.ed-hmeta {color: #8a8984; font-size: 0.8rem; margin-top: 0.1rem;}
+.ed-hmeta {font-size: 0.8rem; margin-top: 0.1rem;}
 .ed-hprice {margin-top: 0.35rem; display: flex; align-items: baseline; gap: 0.5rem;}
-.ed-hp {font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums;}
+.ed-hp {font-size: 1.6rem; font-weight: 700;}
 .ed-hc {font-size: 0.95rem; font-weight: 600;}
 .st-key-head [data-testid="stHorizontalBlock"] {flex-wrap: nowrap !important; gap: 0.25rem;}
 .st-key-head [data-testid="stColumn"] {min-width: 0 !important;}
-.st-key-head button {font-size: 1.5rem; padding: 0 0.25rem; min-height: 2.2rem;}
+.st-key-head button {min-height: 2.75rem; min-width: 2.75rem; padding: 0 0.6rem; white-space: nowrap;}
+/* welcome card */
+.ed-welcome {border: 1px solid var(--ed-line); border-radius: 0.8rem; padding: 0.9rem 1rem; margin: 0.4rem 0 1rem;}
+.ed-wt {font-size: 1.15rem; font-weight: 700; margin-bottom: 0.4rem;}
+.ed-welcome ul {margin: 0; padding-left: 1.1rem;} .ed-welcome li {margin: 0.25rem 0; font-size: 0.92rem;}
 /* compact KPI grid (2 x n) */
 .ed-kgrid {display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin: 0.3rem 0 0.9rem;}
-.ed-k {border: 1px solid rgba(128,128,128,0.25); border-radius: 0.6rem; padding: 0.5rem 0.7rem;}
-.ed-kl {color: #8a8984; font-size: 0.78rem;}
-.ed-kv {font-size: 1.2rem; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.3;}
+.ed-k {border: 1px solid var(--ed-line); border-radius: 0.6rem; padding: 0.5rem 0.7rem;}
+.ed-kl {font-size: 0.78rem;}
+.ed-kv {font-size: 1.2rem; font-weight: 700; line-height: 1.3;}
 .ed-kd {font-size: 0.78rem; font-weight: 600;}
 /* metric list: label (+ small definition) on the left, value on the right */
 .ed-rows {margin: 0.2rem 0 0.8rem;}
 .ed-r {display: flex; justify-content: space-between; align-items: center; gap: 0.75rem;
-       padding: 0.55rem 0.1rem; border-bottom: 1px solid rgba(128,128,128,0.16);}
+       padding: 0.6rem 0.1rem; border-bottom: 1px solid var(--ed-line);}
 .ed-r:last-child {border-bottom: none;}
 .ed-rl {font-size: 0.92rem;}
-.ed-rn {color: #8a8984; font-size: 0.75rem; margin-top: 0.1rem; line-height: 1.3;}
+.ed-rn {font-size: 0.75rem; margin-top: 0.1rem; line-height: 1.35;}
 .ed-rv {font-size: 1rem; font-weight: 600; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums;}
 .ed-rd {font-size: 0.75rem; font-weight: 500; display: block;}
-.ed-good {color: #0ca30c;} .ed-bad {color: #d03b3b;} .ed-warn {color: #c98500;}
+.ed-good {color: var(--ed-good);} .ed-bad {color: var(--ed-bad);} .ed-warn {color: var(--ed-warn);}
+.ed-rd.ed-rn {opacity: 0.68;}
+/* financial statement table: names wrap, numbers right-aligned, no inner scroll */
+.ed-st-wrap {overflow-x: auto; margin: 0.3rem 0 0.4rem;}
+.ed-st {width: 100%; border-collapse: collapse; font-size: 0.8rem; font-variant-numeric: tabular-nums;}
+.ed-st th, .ed-st td {padding: 0.38rem 0.3rem; border-bottom: 1px solid var(--ed-line); vertical-align: top;}
+.ed-st thead th {text-align: right; font-weight: 600; opacity: 0.7; border-bottom: 1px solid currentColor;}
+.ed-st tbody th {text-align: left; font-weight: 400; line-height: 1.3;}
+.ed-st td {text-align: right; white-space: nowrap;}
+.ed-st tr.ed-st-sec th {font-weight: 700; padding-top: 0.6rem;}
 /* hidden helper iframes (browser storage bridge) take no space */
 iframe[title="streamlit_js_eval.streamlit_js_eval"] {display: none;}
 .element-container:has(iframe[title="streamlit_js_eval.streamlit_js_eval"]) {display: none;}
@@ -326,6 +362,33 @@ def resolve_identity() -> str | None:
 
 def plot(fig) -> None:
     st.plotly_chart(fig, theme=None, config=charts.PLOTLY_CONFIG, width="stretch")
+
+
+def section(title: str, meta: str = "", info: str | None = None, control: bool = False,
+            key: str | None = None):
+    """Consistent section header: title (+ meta) on the left, an optional control column and
+    an optional ⓘ popover on the right. Definitions, formulas and sources go into the ⓘ
+    popover instead of grey paragraphs under the content.
+
+    Returns the control column when ``control`` is True (put a widget in it), else None.
+    """
+    import html as _html
+
+    head = f'<div class="ed-h">{_html.escape(title)}'
+    if meta:
+        head += f' <span class="ed-meta">{_html.escape(meta)}</span>'
+    head += "</div>"
+    if not info and not control:
+        st.markdown(head, unsafe_allow_html=True)
+        return None
+    spec = [3.0] + ([2.2] if control else []) + ([0.55] if info else [])
+    with st.container(key=f"sec_{key or abs(hash(title)) % 10**8}"):
+        cols = st.columns(spec, vertical_alignment="center")
+        cols[0].markdown(head, unsafe_allow_html=True)
+        if info:
+            with cols[-1].popover("ⓘ", help="계산 방법·출처"):
+                st.markdown(info)
+        return cols[1] if control else None
 
 
 def kpi_cards(items: list[dict]) -> None:

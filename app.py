@@ -15,7 +15,8 @@ st.set_page_config(page_title="Edger", page_icon="📊", layout="centered",
                    initial_sidebar_state="collapsed")
 inject_css()
 
-VIEWS = {"company": "🔎 종목", "watch": "⭐ 관심·비교"}
+VIEWS = {"company": ":material/search: 종목", "watch": ":material/star: 관심·비교"}
+QUICK = ["AAPL", "NVDA", "MSFT", "TSM", "KO", "JPM", "O"]
 
 
 def set_ticker(value: str) -> None:
@@ -40,20 +41,43 @@ def on_recent_pick() -> None:
     st.session_state["recent_pick"] = None
 
 
+def on_quick_pick() -> None:
+    pick = st.session_state.get("quick_pick")
+    if pick:
+        st.session_state["ticker_input"] = pick
+        set_ticker(pick)
+    st.session_state["quick_pick"] = None
+
+
+def welcome() -> None:
+    """Empty state: say what the app does and offer one-tap starting points."""
+    st.markdown(
+        '<div class="ed-welcome"><div class="ed-wt">미국 상장사를 SEC 공시로 한눈에</div>'
+        '<ul><li><b>실적·재무</b> 연간·TTM·분기, 재무 안정성, 전체 재무제표</li>'
+        '<li><b>사업</b> 사업부문·제품·지역별 매출 비중</li>'
+        '<li><b>가치·배당</b> PER·EV/EBITDA, 역대 배당</li>'
+        '<li><b>공시·내부자</b> 10-K·8-K 앱에서 읽기, 임원 매매</li></ul></div>',
+        unsafe_allow_html=True)
+    st.markdown("**바로 보기**")
+    st.pills("바로 보기", QUICK + ["DEMO"], key="quick_pick", on_change=on_quick_pick,
+             label_visibility="collapsed", format_func=lambda t: "예시(DEMO)" if t == "DEMO" else t)
+    st.caption("DEMO는 네트워크 없이 볼 수 있는 예시 데이터입니다. 관심종목은 ⭐ 관심·비교에서 모아 볼 수 있습니다.")
+
+
 def on_view_change() -> None:
     st.query_params["v"] = st.session_state.get("view") or "company"
 
 
 # ---------------------------------------------------------------- header
-st.markdown('<div class="ed-app">📊 <b>Edger</b> <span class="ed-meta">SEC 공시 · 재무 · 주가</span></div>',
-            unsafe_allow_html=True)
-
 view = st.query_params.get("v") or "company"
 if view not in VIEWS:
     view = "company"
 st.session_state["view"] = view
-st.segmented_control("화면", list(VIEWS), format_func=VIEWS.get, key="view", on_change=on_view_change,
-                     label_visibility="collapsed", width="stretch")
+with st.container(key="topbar"):
+    brand, nav = st.columns([1, 2.6], vertical_alignment="center")
+    brand.markdown('<div class="ed-app">📊 <b>Edger</b></div>', unsafe_allow_html=True)
+    nav.segmented_control("화면", list(VIEWS), format_func=VIEWS.get, key="view", on_change=on_view_change,
+                          label_visibility="collapsed", width="stretch")
 
 watchlist.init()  # start reading browser storage early so the list is ready when needed
 
@@ -80,13 +104,14 @@ if view == "watch":
 else:
     if "ticker_input" not in st.session_state:
         st.session_state["ticker_input"] = ticker
-    st.text_input("티커", key="ticker_input", on_change=on_ticker_input,
-                  placeholder="티커 입력 (예: AAPL, NVDA) 후 엔터", label_visibility="collapsed")
-    if st.session_state.get("recent"):
-        st.pills("최근 본 종목", st.session_state["recent"], key="recent_pick", on_change=on_recent_pick,
+    st.text_input("티커", key="ticker_input", on_change=on_ticker_input, icon=":material/search:",
+                  placeholder="티커 검색 (예: AAPL) 후 엔터", label_visibility="collapsed")
+    others = [t for t in st.session_state.get("recent", []) if t != ticker]  # not the one on screen
+    if others:
+        st.pills("최근 본 종목", others, key="recent_pick", on_change=on_recent_pick,
                  label_visibility="collapsed")
     if not ticker:
-        st.info("티커를 입력하세요. 네트워크 없이 둘러보려면 **DEMO** 를 입력하면 예시 데이터를 볼 수 있습니다.")
+        welcome()
     else:
         view_company.render(ticker)
 
