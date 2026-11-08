@@ -378,3 +378,55 @@ def test_stale_quarterly_history_is_hidden():
 def test_turnaround(latest, prev, word):
     from edger.metrics import turnaround
     assert turnaround(latest, prev) == word
+
+
+def _fake_yfinance(monkeypatch, financial_currency, trading_currency):
+    """yfinance stand-in with Yahoo's row names and sign conventions (outflows negative)."""
+    import sys, types
+    ends = pd.to_datetime(["2025-09-30", "2025-12-31", "2026-03-31", "2026-06-30", "2026-09-30"])
+    def frame(rows):
+        return pd.DataFrame(rows, index=ends).T[ends[::-1]]  # Yahoo: newest column first
+    income = frame({"Total Revenue": [100, 110, 120, 130, 150], "Operating Income": [40, 44, 48, 52, 60],
+                    "Net Income": [30, 33, 36, 39, 45], "Diluted Average Shares": [10, 10, 10, 10, 10]})
+    cash = frame({"Operating Cash Flow": [50, 55, 60, 65, 70], "Capital Expenditure": [-20, -20, -20, -20, -20],
+                  "Cash Dividends Paid": [-5, -5, -5, -5, -6]})
+    bal = frame({"Total Assets": [500] * 5, "Stockholders Equity": [300] * 5, "Cash And Cash Equivalents": [80] * 5,
+                 "Long Term Debt": [60] * 5, "Current Debt": [10] * 5,
+                 "Total Liabilities Net Minority Interest": [200] * 5})
+    class T:
+        def __init__(self, t):
+            self.quarterly_income_stmt, self.quarterly_cashflow, self.quarterly_balance_sheet = income, cash, bal
+            self.info = {"financialCurrency": financial_currency, "currency": trading_currency}
+    fake = types.ModuleType("yfinance"); fake.Ticker = T
+    monkeypatch.setitem(sys.modules, "yfinance", fake)
+
+
+def test_yahoo_quarterly_mapping(monkeypatch):
+    from edger import market
+    _fake_yfinance(monkeypatch, "USD", "USD")
+    y = market.yahoo_quarterly("FRO")
+    raw = y["raw"]
+    assert list(raw.index.strftime("%Y-%m")) == ["2025-09", "2025-12", "2026-03", "2026-06", "2026-09"]  # oldest first
+    assert raw["capex"].iloc[-1] == 20 and raw["dividends"].iloc[-1] == 6    # outflows made positive
+    assert raw["eps"].iloc[-1] == pytest.approx(4.5) and y["per_share_ok"]
+
+
+def test_yahoo_adr_drops_per_share(monkeypatch):
+    """TSM-like: reports in TWD, ADR trades in USD; Yahoo share counts are per ADR."""
+    from edger import market
+    _fake_yfinance(monkeypatch, "TWD", "USD")
+    y = market.yahoo_quarterly("TSM")
+    assert y["currency"] == "TWD" and not y["per_share_ok"]
+    assert y["raw"]["eps"].isna().all()
+
+
+def test_period_table_falls_back_to_yahoo(monkeypatch):
+    from edger import data
+    _fake_yfinance(monkeypatch, "USD", "USD")
+    monkeypatch.setattr(data, "fetch_facts", lambda t: pd.DataFrame())  # no SEC quarterly data
+    q, cur = data.period_table("FRO", "quarterly", 12)
+    assert q.attrs["source"] == "Yahoo" and q.attrs["quarters"] == 5 and cur == "USD"
+    assert q["debt"].iloc[-1] == 70                       # long-term + current debt
+    t, _ = data.period_table("FRO", "ttm", 12)
+    assert t["revenue"].iloc[-1] == 110 + 120 + 130 + 150  # last four quarters
+    assert t["fcf"].iloc[-1] == (55 + 60 + 65 + 70) - 80

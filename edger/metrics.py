@@ -828,3 +828,19 @@ def dividend_history(payments: pd.Series, prices: pd.Series | None = None,
         "cagr10": growth_rate(10),
         "first_year": int(annual.index[0]),
     }
+
+
+def table_from_raw(raw: pd.DataFrame, period: Period, n: int = 12) -> pd.DataFrame:
+    """Build a dashboard table from an already-assembled quarterly frame (metric-key columns),
+    e.g. Yahoo quarterly financials. Same TTM and derived logic as SEC data."""
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    table = pd.DataFrame(index=pd.DatetimeIndex(raw.index).sort_values())
+    for m in METRICS:
+        table[m.key] = raw[m.key].reindex(table.index) if m.key in raw else np.nan
+    table = table[table[["revenue", "net_income"]].notna().any(axis=1)]
+    if period == "ttm":
+        table = _ttm_table(table)
+    if table.empty:
+        return pd.DataFrame()
+    return _add_derived(table.copy(), "quarterly" if period == "quarterly" else "ttm").tail(n)

@@ -208,3 +208,91 @@ def fx_rate(from_currency: str, to_currency: str) -> float | None:
         return 1.0
     s = _yahoo_history(f"{from_currency}{to_currency}=X", "5d")
     return float(s.iloc[-1]) if not s.empty else None
+
+
+# ---------------------------------------------------------------- quarterly financials
+# Yahoo row name(s) -> dashboard metric key. First row present wins. Cash outflows are
+# reported negative by Yahoo and flipped to positive amounts (as in SEC data).
+_YAHOO_ROWS = {
+    "income": {
+        "revenue": ["Total Revenue", "Operating Revenue"],
+        "gross_profit": ["Gross Profit"],
+        "operating_income": ["Operating Income", "Total Operating Income As Reported"],
+        "net_income": ["Net Income Common Stockholders", "Net Income"],
+        "pretax_income": ["Pretax Income"],
+        "income_tax": ["Tax Provision"],
+        "interest_expense": ["Interest Expense", "Interest Expense Non Operating"],
+        "shares_diluted": ["Diluted Average Shares"],
+        "net_interest_income": ["Net Interest Income"],
+    },
+    "cashflow": {
+        "ocf": ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities"],
+        "capex": ["Capital Expenditure", "Purchase Of PPE"],
+        "da": ["Depreciation And Amortization", "Depreciation Amortization Depletion"],
+        "dividends": ["Cash Dividends Paid", "Common Stock Dividend Paid"],
+        "buybacks": ["Repurchase Of Capital Stock", "Common Stock Payments"],
+    },
+    "balance": {
+        "cash": ["Cash And Cash Equivalents"],
+        "assets": ["Total Assets"],
+        "liabilities": ["Total Liabilities Net Minority Interest"],
+        "equity": ["Stockholders Equity", "Common Stock Equity"],
+        "current_assets": ["Current Assets"],
+        "current_liabilities": ["Current Liabilities"],
+        # Mapped onto the SEC debt components so the same debt logic applies:
+        # noncurrent long-term debt + all current borrowings.
+        "_ltd_noncurrent": ["Long Term Debt"],
+        "_debt_current": ["Current Debt"],
+        "_op_lease": ["Capital Lease Obligations"],
+    },
+}
+_OUTFLOWS = {"capex", "dividends", "buybacks"}
+
+
+def yahoo_quarterly(ticker: str) -> dict | None:
+    """Recent quarterly financials from Yahoo (typically 5-7 quarters), for companies whose
+    quarterly numbers are not in SEC XBRL (foreign filers). Returns {"raw": DataFrame indexed
+    by quarter end with metric-key columns, "currency": reporting currency, "per_share_ok":
+    bool} or None.
+
+    Yahoo's share counts and EPS for ADRs are per ADR (TSM: 1 ADR = 5 shares) while SEC
+    figures are per ordinary share, so per-share values are only kept when the reporting
+    and trading currency agree.
+    """
+    if demo.is_demo(ticker):
+        return None
+    try:
+        import yfinance as yf
+
+        tk = yf.Ticker(ticker)
+        frames = {"income": tk.quarterly_income_stmt, "cashflow": tk.quarterly_cashflow,
+                  "balance": tk.quarterly_balance_sheet}
+        info = tk.info or {}
+    except Exception:
+        return None
+    columns: dict[str, pd.Series] = {}
+    for kind, mapping in _YAHOO_ROWS.items():
+        df = frames.get(kind)
+        if df is None or df.empty:
+            continue
+        for key, names in mapping.items():
+            for name in names:
+                if name in df.index and df.loc[name].notna().any():
+                    s = pd.to_numeric(df.loc[name], errors="coerce")
+                    columns[key] = s.abs() if key in _OUTFLOWS else s
+                    break
+    if "revenue" not in columns and "net_income" not in columns:
+        return None
+    raw = pd.DataFrame(columns)
+    raw.index = pd.DatetimeIndex(raw.index).tz_localize(None).normalize()
+    raw = raw.sort_index()
+    raw = raw[raw[[c for c in ("revenue", "net_income") if c in raw]].notna().any(axis=1)]
+    if raw.empty:
+        return None
+    currency = info.get("financialCurrency") or info.get("currency") or "USD"
+    per_share_ok = currency == (info.get("currency") or "USD")
+    if not per_share_ok and "shares_diluted" in raw:
+        raw["shares_diluted"] = np.nan
+    if "shares_diluted" in raw and "net_income" in raw:
+        raw["eps"] = raw["net_income"] / raw["shares_diluted"]  # NaN for ADRs (see above)
+    return {"raw": raw, "currency": currency, "per_share_ok": per_share_ok}

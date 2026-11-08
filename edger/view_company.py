@@ -191,8 +191,11 @@ def _kpis(snap: dict | None, table: pd.DataFrame, period: str, currency: str, bu
             shown = fmt.per_share(value, currency) if col in PER_SHARE_COLS else fmt.money(value, currency)
             items.append({"label": name, "value": shown, "delta": delta,
                           "word": turnaround(value, yoy_prev(table, col, period))})
-        st.markdown(f'<div class="ed-sub" style="margin-top:0.6rem">실적 <b>{html.escape(tag)}</b> · 증감은 {note}</div>',
-                    unsafe_allow_html=True)
+        src = ""
+        if table.attrs.get("source") == "Yahoo":
+            src = f" · 출처 Yahoo Finance (최근 {table.attrs.get('quarters', '')}분기)"
+        st.markdown(f'<div class="ed-sub" style="margin-top:0.6rem">실적 <b>{html.escape(tag)}</b> · 증감은 {note}'
+                    f'{html.escape(src)}</div>', unsafe_allow_html=True)
     stale = (snap or {}).get("stale_since")
     if stale is not None:
         st.warning(f"⚠️ SEC에 있는 최신 실적이 {pd.Timestamp(stale):%Y-%m} 결산이라 오래됐습니다. "
@@ -318,6 +321,11 @@ def _financials(ticker: str, table: pd.DataFrame, annual: pd.DataFrame, period_k
         return
     if period_key == "ttm":
         st.caption("TTM = 각 분기 시점의 최근 4분기 합계. 계절성 없이 추세를 볼 수 있습니다.")
+    if table.attrs.get("source") == "Yahoo":
+        per_share = "" if table.attrs.get("per_share_ok") else (
+            " EPS·주식수는 ADR(주식 여러 주를 묶은 미국 상장 증권) 단위와 섞여 있어 표시하지 않습니다.")
+        st.caption(f"ℹ️ SEC에 분기 재무 데이터가 없어 Yahoo Finance의 최근 {table.attrs.get('quarters', '')}개 분기로 "
+                   f"보여줍니다(SEC 원문이 아닌 Yahoo 가공 데이터). 분기가 적어 전년 대비 비교는 일부만 됩니다.{per_share}")
 
     cfg = BUSINESS[business]
     if cfg.get("note"):
@@ -794,7 +802,8 @@ def _insiders(ticker: str, mode: str) -> None:
             trades = pd.DataFrame(columns=data.INSIDER_COLUMNS)
             st.warning(f"내부자 거래를 불러오지 못했습니다: {exc}")
     if trades.empty:
-        st.info("최근 내부자 거래 보고(Form 4)가 없습니다.")
+        st.info("최근 내부자 거래 보고(Form 4)가 없습니다. 외국 기업(20-F 제출)은 Form 4 제출 의무가 없어 "
+                "내부자 거래가 SEC에 올라오지 않습니다.")
         return
     market = trades[trades["code"].isin(["P", "S"])]
     buy, sell = market[market["code"] == "P"], market[market["code"] == "S"]

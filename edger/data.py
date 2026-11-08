@@ -265,9 +265,10 @@ def _statement_from_key_lines(ticker: str, kind: str, period: str) -> tuple[pd.D
     """Last resort: the main line items the dashboard already computes."""
     from .metrics import DERIVED_LABELS, METRIC_BY_KEY, build_table
 
-    table, _ = build_table(fetch_facts(ticker), period, MAX_STATEMENT_PERIODS)
+    table, _ = period_table(ticker, period, MAX_STATEMENT_PERIODS)
     if table.empty:
         return pd.DataFrame(), ""
+    src = "Yahoo Finance 분기 데이터" if table.attrs.get("source") == "Yahoo" else "XBRL 데이터에서 계산"
     table = table.iloc[::-1]
     rows = []
     for key in KEY_LINES[kind]:
@@ -277,7 +278,7 @@ def _statement_from_key_lines(ticker: str, kind: str, period: str) -> tuple[pd.D
         rows.append({"label": DERIVED_LABELS.get(key) or m.label, "depth": 0, "is_abstract": False,
                      "kind": m.unit if m else "money",
                      **{lbl: v for lbl, v in zip(table["label"], table[key])}})
-    return pd.DataFrame(rows), "주요 항목만 (XBRL 데이터에서 계산)"
+    return pd.DataFrame(rows), f"주요 항목만 ({src})"
 
 
 def fetch_statement(ticker: str, kind: str, period: str = "annual") -> dict:
@@ -380,3 +381,25 @@ def read_filing(ticker: str, accession: str, form: str) -> list[dict]:
         if text:
             sections.append({"title": "본문", "text": text})
     return sections
+
+
+# ---------------------------------------------------------------- period tables
+def period_table(ticker: str, period: str, n: int) -> tuple[pd.DataFrame, str]:
+    """Financial table for a basis. SEC XBRL first; for quarterly / TTM, companies without
+    usable quarterly XBRL (foreign filers, or history that stopped) fall back to Yahoo's
+    recent quarters. ``table.attrs["source"]`` says which one was used."""
+    from . import market
+    from .metrics import build_table, table_from_raw
+
+    table, currency = build_table(fetch_facts(ticker), period, n)
+    table.attrs["source"] = "SEC"
+    if period != "annual" and table.empty and not is_demo(ticker):
+        y = market.yahoo_quarterly(ticker)
+        if y is not None:
+            yt = table_from_raw(y["raw"], period, n)
+            if not yt.empty:
+                yt.attrs["source"] = "Yahoo"
+                yt.attrs["quarters"] = int(len(y["raw"]))
+                yt.attrs["per_share_ok"] = bool(y["per_share_ok"])
+                return yt, y["currency"]
+    return table, currency

@@ -88,7 +88,9 @@ def load_facts(ticker: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def load_table(ticker: str, period: str, n: int):
-    return build_table(load_facts(ticker), period, n)
+    if period == "annual":
+        return build_table(load_facts(ticker), period, n)
+    return data.period_table(ticker, period, n)  # may fall back to Yahoo for foreign filers
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
@@ -257,6 +259,8 @@ def load_snapshot(ticker: str) -> dict:
     quarterly, _ = load_table(ticker, "quarterly", 12)
     q = load_quote(ticker)
     flows, prev_flows = ttm(quarterly), ttm(quarterly, offset=4)
+    if flows and quarterly.attrs.get("source") == "Yahoo":
+        flows["label"] += " · Yahoo"
     if flows is None and not annual.empty:  # fall back to the latest fiscal years
         def fy(row_idx):
             last = annual.iloc[row_idx]
