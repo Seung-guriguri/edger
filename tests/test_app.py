@@ -162,7 +162,8 @@ def test_business_tab():
     at = run(tab="사업", t="DEMO")
     assert not at.error
     text = page_text(at)
-    for expected in ("사업 개요", "매출 구성", "Industrial Robots", "영업이익률", "연도별 구성"):
+    for expected in ("사업 개요", "매출 구성", "Industrial Robots", "영업이익률", "연도별 구성", "비용 구조",
+                     "매출원가", "매출의", "ed-dot"):
         assert expected in text, expected
     at.segmented_control(key="biz_axis").set_value("지역").run()
     assert not at.exception and "United States" in page_text(at)

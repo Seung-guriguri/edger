@@ -355,26 +355,6 @@ def _alpha(hex_color: str, a: float) -> str:
 
 
 # ---------------------------------------------------------------- revenue mix
-def share_bars(latest: pd.Series, share: pd.Series, mode: str, currency: str = "USD") -> go.Figure:
-    """Horizontal bars, largest first, each labelled with amount and share."""
-    p = PALETTE[mode]
-    order = latest.sort_values(ascending=True)  # plotly draws bottom-up
-    div, suffix = fmt.scale_for(float(order.max() or 0))
-    labels = [f"{fmt.money(v, currency)} · {share.get(k, float('nan')) * 100:.0f}%" for k, v in order.items()]
-    names = [k if len(k) <= 22 else k[:21] + "…" for k in order.index]
-    fig = go.Figure(go.Bar(
-        y=names, x=order.values / div, orientation="h", marker_color=p["series"][0],
-        text=labels, textposition="outside", cliponaxis=False, constraintext="none",
-        textfont=dict(size=12, color=p["ink"]), customdata=list(order.index),
-        hovertemplate="%{customdata}<br><b>%{text}</b><extra></extra>",
-    ))
-    fig = _base(fig, mode, height=36 + 34 * len(order), legend=False, right=8)
-    fig.update_layout(margin=dict(t=6, r=96), bargap=0.32)
-    fig.update_xaxes(type="linear", showticklabels=False, showline=False, showgrid=False, zeroline=False)
-    fig.update_yaxes(type="category", gridcolor="rgba(0,0,0,0)", zeroline=False, tickfont=dict(size=12, color=p["ink"]))
-    return fig
-
-
 def mix_columns(values: pd.DataFrame, mode: str, currency: str = "USD", max_parts: int = 5) -> go.Figure:
     """Stacked columns per fiscal year. Parts keep a fixed colour order (largest first) and
     anything past ``max_parts`` folds into one grey "기타" block."""
@@ -398,4 +378,69 @@ def mix_columns(values: pd.DataFrame, mode: str, currency: str = "USD", max_part
     fig.update_layout(barmode="stack", bargap=0.45, barcornerradius=0,
                       legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0, traceorder="normal"))
     fig.update_yaxes(ticksuffix=suffix, tickprefix="$" if currency == "USD" else "")
+    return fig
+
+
+# ---------------------------------------------------------------- donut
+OTHER = {"light": "#b5b4ae", "dark": "#5c5b57"}  # neutral grey for the folded "기타" slice
+_DARK_TEXT_SLOTS = {3}                             # yellow: near-black label (palette rule)
+
+
+def donut_colors(labels: list[str], mode: str) -> list[str]:
+    """Fixed categorical order for real parts; '기타…' always grey."""
+    p = PALETTE[mode]
+    out, i = [], 0
+    for lbl in labels:
+        if str(lbl).startswith("기타"):
+            out.append(OTHER[mode])
+        else:
+            out.append(p["series"][i % len(p["series"])])
+            i += 1
+    return out
+
+
+def fold_parts(values: pd.Series, max_parts: int = 6) -> pd.Series:
+    """Largest items first; beyond ``max_parts`` slices the tail (and any existing '기타…'
+    rows) fold into one '기타' slice, always last."""
+    v = values.dropna()
+    v = v[v > 0]
+    is_other = [str(k).startswith("기타") for k in v.index]
+    regular = v[[not o for o in is_other]].sort_values(ascending=False)
+    other = float(v[is_other].sum())
+    if len(regular) + (1 if other else 0) > max_parts:
+        other += float(regular.iloc[max_parts - 1:].sum())
+        regular = regular.iloc[:max_parts - 1]
+    return pd.concat([regular, pd.Series({"기타": other})]) if other else regular
+
+
+def donut(parts: pd.Series, mode: str, center_title: str, center_value: str,
+          colors: list[str] | None = None, hover_values: list[str] | None = None) -> go.Figure:
+    """A donut with the share printed on slices of >= 6% and a total in the hole.
+
+    Identity is carried by the colour dot in the list rendered under the chart (that list is
+    also the exact-number table view), so the chart itself has no legend."""
+    p = PALETTE[mode]
+    labels = [str(k) for k in parts.index]
+    colors = colors or donut_colors(labels, mode)
+    share = parts / parts.sum()
+    text = [f"{s * 100:.0f}%" if s >= 0.06 else "" for s in share]
+    text_colors = ["#0b0b0b" if (c == p["series"][3] or c == OTHER["light"]) else "#ffffff" for c in colors]
+    fig = go.Figure(go.Pie(
+        labels=labels, values=parts.values, hole=0.62, sort=False, direction="clockwise", rotation=0,
+        marker=dict(colors=colors, line=dict(color=p["surface"], width=2)),
+        text=text, textinfo="text", textposition="inside", insidetextorientation="horizontal",
+        textfont=dict(family=FONT, size=13, color=text_colors),
+        customdata=hover_values or labels,
+        hovertemplate="%{label}<br><b>%{customdata}</b> · %{percent:.1%}<extra></extra>",
+    ))
+    fig.update_layout(
+        height=250, margin=dict(l=4, r=4, t=4, b=4), showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family=FONT, size=12, color=p["ink2"]),
+        hoverlabel=dict(bgcolor=p["surface"], bordercolor=p["axis"], font=dict(family=FONT, size=13, color=p["ink"])),
+        annotations=[
+            dict(text=center_title, x=0.5, y=0.58, showarrow=False, font=dict(size=12, color=p["ink2"])),
+            dict(text=f"<b>{center_value}</b>", x=0.5, y=0.44, showarrow=False, font=dict(size=17, color=p["ink"])),
+        ],
+    )
     return fig

@@ -87,6 +87,8 @@ button[data-baseweb="tab"][aria-selected="true"] p {font-weight: 700;}
        padding: 0.6rem 0.1rem; border-bottom: 1px solid var(--ed-line);}
 .ed-r:last-child {border-bottom: none;}
 .ed-rl {font-size: 0.92rem;}
+.ed-dot {display: inline-block; width: 0.62rem; height: 0.62rem; border-radius: 50%; margin-right: 0.45rem;
+         vertical-align: 0.05rem;}
 .ed-rn {font-size: 0.75rem; margin-top: 0.1rem; line-height: 1.35;}
 .ed-rv {font-size: 1rem; font-weight: 600; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums;}
 .ed-rd {font-size: 0.75rem; font-weight: 500; display: block;}
@@ -431,7 +433,9 @@ def metric_rows(rows: list[dict]) -> None:
         tone = {"good": "ed-good", "bad": "ed-bad", "warn": "ed-warn"}.get(r.get("tone"), "ed-rn")
         delta = f'<span class="ed-rd {tone}">{_html.escape(r["delta"])}</span>' if r.get("delta") else ""
         vtone = {"good": " ed-good", "bad": " ed-bad", "warn": " ed-warn"}.get(r.get("value_tone"), "")
-        out.append(f'<div class="ed-r"><div><div class="ed-rl">{_html.escape(r["label"])}</div>{note}</div>'
+        dot = (f'<span class="ed-dot" style="background:{r["swatch"]}"></span>' if r.get("swatch") else "")
+        out.append(f'<div class="ed-r"><div><div class="ed-rl">{dot}{_html.escape(r["label"])}</div>{note}</div>'
+
                    f'<div class="ed-rv{vtone}">{_html.escape(str(r["value"]))}{delta}</div></div>')
     st.markdown(f'<div class="ed-rows">{"".join(out)}</div>', unsafe_allow_html=True)
 

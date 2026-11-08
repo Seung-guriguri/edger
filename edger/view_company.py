@@ -7,8 +7,8 @@ import pandas as pd
 import streamlit as st
 
 from . import charts, data, fmt, watchlist
-from .metrics import (DERIVED_LABELS, METRIC_BY_KEY, cagr, dividend_history, historical_per, turnaround, yoy,
-                      yoy_prev)
+from .metrics import (DERIVED_LABELS, METRIC_BY_KEY, cagr, cost_structure, dividend_history, historical_per,
+                      turnaround, yoy, yoy_prev)
 from .ui import (kpi_cards, load_business, metric_rows, section, load_dividends, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
                  load_profile, load_snapshot, load_statement, load_table, plot,
                  safe_markdown_text, theme_mode)
@@ -134,7 +134,7 @@ def render(ticker: str) -> None:
             elif name == "div":
                 _dividends(ticker, snap, annual, currency, mode)
             elif name == "biz":
-                _business(ticker, currency, mode)
+                _business(ticker, currency, mode, annual, business)
             elif name == "filings":
                 _filings(ticker)
             else:
@@ -641,7 +641,8 @@ def _no_market_cap(snap: dict | None) -> None:
 
 
 # ---------------------------------------------------------------- 사업
-def _business(ticker: str, currency: str, mode: str) -> None:
+def _business(ticker: str, currency: str, mode: str, annual: pd.DataFrame | None = None,
+              business: str = "general") -> None:
     with st.spinner("최근 연간 보고서(10-K·20-F)에서 사업 정보를 읽는 중… (처음엔 몇 초 걸립니다)"):
         try:
             biz = load_business(ticker)
@@ -661,6 +662,13 @@ def _business(ticker: str, currency: str, mode: str) -> None:
                 st.markdown(safe_markdown_text("\n\n".join(paras[1:])))
 
     b = {k: v for k, v in (biz.get("breakdowns") or {}).items() if not k.startswith("_")}
+    try:
+        _render_mix(b, biz, source, currency, mode)
+    finally:
+        _costs(annual if annual is not None else pd.DataFrame(), currency, mode, business)
+
+
+def _render_mix(b: dict, biz: dict, source: str, currency: str, mode: str) -> None:
     if not b:
         st.info("매출 구성 데이터가 없습니다. 연간 보고서 XBRL에 사업부문·제품·지역별 매출이 태그되지 않은 회사입니다 "
                 "(금융사·소형사에 흔함).")
@@ -676,9 +684,11 @@ def _business(ticker: str, currency: str, mode: str) -> None:
     part = b[titles[pick]]
     values, share, growth = part["values"], part["share"], part["growth"]
     latest = values.columns[-1]
-    st.markdown(f"<span class='ed-meta'>FY{latest.year % 100:02d} · 비중은 전체 매출 대비</span>",
-                unsafe_allow_html=True)
-    plot(charts.share_bars(values[latest], share, mode, currency))
+    folded = charts.fold_parts(values[latest])
+    colors = dict(zip(folded.index, charts.donut_colors(list(folded.index), mode)))
+    plot(charts.donut(folded, mode, f"FY{latest.year % 100:02d} 매출",
+                      fmt.money(float(values[latest].sum()), currency),
+                      hover_values=[fmt.money(v, currency) for v in folded.values]))
 
     rows = []
     op = part.get("op_income")
@@ -689,6 +699,7 @@ def _business(ticker: str, currency: str, mode: str) -> None:
             note.append(f"영업이익률 {op.loc[name].iloc[-1] / values.loc[name, latest] * 100:.1f}%")
         rows.append({
             "label": name, "value": fmt.money(values.loc[name, latest], currency),
+            "swatch": colors.get(name, colors.get("기타")),  # folded items share the grey 기타 dot
             "delta": None if g is None or pd.isna(g) else f"{g * 100:+.1f}% 전년 대비",
             "tone": None if g is None or pd.isna(g) else ("good" if g >= 0 else "bad"),
             "note": " · ".join([f"비중 {share.get(name, float('nan')) * 100:.1f}%", *note]),
@@ -700,6 +711,48 @@ def _business(ticker: str, currency: str, mode: str) -> None:
         plot(charts.mix_columns(values, mode, currency))
     if not part.get("exact"):
         st.caption("항목 합이 전체 매출과 달라 차액을 '기타(미분류)'로 표시했습니다 (부문 간 내부거래 제거 등).")
+
+
+COST_ORDER = ["매출원가", "연구개발비", "판매관리비", "기타 영업비용", "영업이익"]
+
+
+def _costs(annual: pd.DataFrame, currency: str, mode: str, business: str) -> None:
+    """Where revenue goes: cost of revenue, R&D, SG&A, other operating costs, operating income."""
+    if business != "general" or annual.empty:
+        return  # banks, insurers and REITs do not report costs in this shape
+    cs = cost_structure(annual.iloc[-1])
+    if cs is None:
+        return
+    prev = cost_structure(annual.iloc[-2]) if len(annual) > 1 else None
+    parts = cs["parts"].reindex([k for k in COST_ORDER if k in cs["parts"].index])
+    label = annual["label"].iloc[-1]
+    section("비용 구조", f"{label} · 매출 100 기준" if not cs["loss"] else f"{label} · 영업손실",
+            key="costs",
+            info="손익계산서의 표준 항목으로 매출이 어디에 쓰였는지 나눕니다: 매출원가, 연구개발비, "
+                 "판매관리비(없으면 판매비 + 일반관리비), 영업이익. 표준 항목으로 설명되지 않는 나머지는 "
+                 "'기타 영업비용'입니다(회사 고유 항목, 구조조정비 등). 영업손실이면 비용끼리의 비중만 보여줍니다.")
+    p = charts.PALETTE[mode]
+    # fixed colours per cost type, so the same kind of cost looks the same for every company
+    color_of = {"매출원가": p["series"][0], "연구개발비": p["series"][1], "판매관리비": p["series"][2],
+                "기타 영업비용": charts.OTHER[mode], "영업이익": p["series"][3]}
+    colors = [color_of[k] for k in parts.index]
+    plot(charts.donut(parts, mode, "매출" if not cs["loss"] else "총비용", fmt.money(cs["base"], currency),
+                      colors=colors, hover_values=[fmt.money(v, currency) for v in parts.values]))
+    rows = []
+    for name, v in parts.items():
+        ratio = v / cs["base"]
+        delta, tone = None, None
+        if prev is not None and name in prev["parts"].index:
+            d = ratio - prev["parts"][name] / prev["base"]
+            delta = f"{d * 100:+.1f}%p 전년 대비"
+            if name == "영업이익":
+                tone = "good" if d >= 0 else "bad"
+        rows.append({"label": name, "value": fmt.money(v, currency), "swatch": color_of[name],
+                     "note": f"매출의 {ratio * 100:.1f}%" if not cs["loss"] else f"총비용의 {ratio * 100:.1f}%",
+                     "delta": delta, "tone": tone})
+    metric_rows(rows)
+    if not cs["exact"]:
+        st.caption("공시 항목끼리 일부 겹쳐(예: 판관비 안에 연구개발비 포함) 합이 매출과 정확히 맞지 않습니다.")
 
 
 # ---------------------------------------------------------------- 배당

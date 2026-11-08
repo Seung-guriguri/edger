@@ -493,3 +493,39 @@ def test_overview_reflows_wrapped_text():
             "other private investors and were incorporated in the country as a company limited by shares.\n")
     out = overview(text)
     assert out.startswith("Our legal name is Example Co.") and "government and other private" in out
+
+
+def test_annual_ignores_ttm_figures_in_10q():
+    """AMZN reports trailing-twelve-month results in its 10-Qs; they are not fiscal years."""
+    rows = [_flow("Revenues", "2024-01-01", "2024-12-31", 638.0, "2025-02-07", "10-K"),
+            _flow("Revenues", "2024-04-01", "2025-03-31", 650.0, "2025-05-02", "10-Q"),
+            _flow("Revenues", "2024-07-01", "2025-06-30", 670.0, "2025-08-01", "10-Q"),
+            _flow("Revenues", "2025-01-01", "2025-12-31", 717.0, "2026-02-06", "10-K")]
+    a, _ = build_table(pd.DataFrame(rows), "annual")
+    assert list(a.index.strftime("%Y-%m-%d")) == ["2024-12-31", "2025-12-31"]
+
+
+def test_annual_keeps_year_whose_latest_copy_is_another_form():
+    """The latest copy of a fiscal year can be an 8-K recast or the proxy (DEF 14A pay-versus-
+    performance table); the annual-report value must still be used, not the year dropped."""
+    rows = [_flow("Revenues", "2025-01-01", "2025-12-31", 100.0, "2026-02-06", "10-K"),
+            _flow("NetIncomeLoss", "2025-01-01", "2025-12-31", 20.0, "2026-02-06", "10-K"),
+            _flow("NetIncomeLoss", "2025-01-01", "2025-12-31", 20.0, "2026-04-09", "DEF 14A")]
+    a, _ = build_table(pd.DataFrame(rows), "annual")
+    assert a["net_income"].iloc[-1] == 20.0
+
+
+def test_cost_structure_adds_up_to_revenue():
+    from edger.metrics import cost_structure
+    aapl = pd.Series({"revenue": 478.8, "operating_income": 158.1, "cost_of_revenue": 245.2, "rnd": 45.8,
+                      "sga": 29.8})
+    cs = cost_structure(aapl)
+    assert cs["parts"].sum() == pytest.approx(478.9, abs=0.2) and "기타 영업비용" not in cs["parts"]
+    msft = pd.Series({"revenue": 331.8, "operating_income": 155.2, "cost_of_revenue": 106.4, "rnd": 35.6,
+                      "selling": 26.7, "gna": 8.0})          # no SG&A total: selling + G&A
+    assert cost_structure(msft)["parts"]["판매관리비"] == pytest.approx(34.7)
+    amzn = pd.Series({"revenue": 716.9, "operating_income": 80.0, "cost_of_revenue": 356.4, "gna": 11.2})
+    cs = cost_structure(amzn)                                 # fulfillment etc. untagged
+    assert cs["parts"]["기타 영업비용"] == pytest.approx(716.9 - 80.0 - 356.4 - 11.2)
+    loss = cost_structure(pd.Series({"revenue": 100.0, "operating_income": -10.0, "cost_of_revenue": 80.0}))
+    assert loss["loss"] and "영업이익" not in loss["parts"] and loss["base"] == pytest.approx(110.0)

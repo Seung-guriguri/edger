@@ -214,6 +214,33 @@ METRICS: tuple[Metric, ...] = (
         "us-gaap:ImpairmentOfRealEstate",
         "us-gaap:ImpairmentOfLongLivedAssetsHeldForUse",
     )),
+    # --- cost structure (operating companies)
+    Metric("cost_of_revenue", "매출원가", "flow", (
+        "us-gaap:CostOfRevenue",
+        "us-gaap:CostOfGoodsAndServicesSold",
+        "us-gaap:CostOfGoodsSold",
+        "us-gaap:CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization",
+        "ifrs-full:CostOfSales",
+    )),
+    Metric("rnd", "연구개발비", "flow", (
+        "us-gaap:ResearchAndDevelopmentExpense",
+        "us-gaap:ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost",
+        "ifrs-full:ResearchAndDevelopmentExpense",
+    )),
+    Metric("sga", "판매관리비", "flow", (
+        "us-gaap:SellingGeneralAndAdministrativeExpense",
+        "ifrs-full:SellingGeneralAndAdministrativeExpense",
+    )),
+    Metric("selling", "판매·마케팅비", "flow", (
+        "us-gaap:SellingAndMarketingExpense",
+        "us-gaap:SellingExpense",
+        "ifrs-full:SellingExpense",
+        "ifrs-full:DistributionCosts",
+    )),
+    Metric("gna", "일반관리비", "flow", (
+        "us-gaap:GeneralAndAdministrativeExpense",
+        "ifrs-full:AdministrativeExpense",
+    )),
     Metric("current_assets", "유동자산", "instant", (
         "us-gaap:AssetsCurrent",
         "ifrs-full:CurrentAssets",
@@ -311,15 +338,23 @@ def _flow_series(sub: pd.DataFrame, period: Period) -> pd.Series:
     original = (sub.sort_values("filing_date", na_position="last")
                    .drop_duplicates(subset=["period_start", "period_end"], keep="first").copy())
     original["days"] = (original["period_end"] - original["period_start"]).dt.days
-    sub = _latest_filed(sub, ["period_start", "period_end"]).copy()
-    sub["days"] = (sub["period_end"] - sub["period_start"]).dt.days
-
     if period == "annual":
         lo, hi = _ANNUAL_DAYS
-        a = sub[(sub["days"] >= lo) & (sub["days"] <= hi)]
+        a = sub.assign(days=(sub["period_end"] - sub["period_start"]).dt.days)
+        a = a[(a["days"] >= lo) & (a["days"] <= hi)]
+        # Twelve-month figures inside 10-Qs (AMZN reports trailing-twelve-month results there)
+        # are not fiscal years: keep annual-report facts. This must happen *before* picking the
+        # latest filing, because the latest copy of a fiscal year is often in another form
+        # (an 8-K recast, or the proxy's pay-versus-performance table for net income).
+        annual_form = a["form_type"].fillna("").str.match(r"^(10-K|20-F|40-F|10-KT)")
+        if annual_form.any():
+            a = a[annual_form]
+        a = _latest_filed(a, ["period_start", "period_end"])
         a = a.sort_values("days").drop_duplicates("period_end", keep="last")
         return a.set_index("period_end")["numeric_value"].sort_index()
 
+    sub = _latest_filed(sub, ["period_start", "period_end"]).copy()
+    sub["days"] = (sub["period_end"] - sub["period_start"]).dt.days
     lo, hi = _QUARTER_DAYS
     direct = sub[(sub["days"] >= lo) & (sub["days"] <= hi)]
     result = direct.drop_duplicates("period_end", keep="last").set_index("period_end")["numeric_value"]
@@ -349,7 +384,7 @@ def _instant_series(sub: pd.DataFrame) -> pd.Series:
 
 
 # Amounts that cannot be negative; a negative value can only come from a broken derivation.
-NON_NEGATIVE = frozenset({"revenue", "capex", "da", "dividends", "buybacks", "dps", "shares_diluted",
+NON_NEGATIVE = frozenset({"cost_of_revenue", "rnd", "sga", "selling", "gna", "revenue", "capex", "da", "dividends", "buybacks", "dps", "shares_diluted",
                           "premiums", "interest_expense", "_dep", "_amort", "deposits"})
 
 
@@ -844,3 +879,48 @@ def table_from_raw(raw: pd.DataFrame, period: Period, n: int = 12) -> pd.DataFra
     if table.empty:
         return pd.DataFrame()
     return _add_derived(table.copy(), "quarterly" if period == "quarterly" else "ttm").tail(n)
+
+
+# ---------------------------------------------------------------- cost structure
+def cost_structure(row: pd.Series) -> dict | None:
+    """Where each unit of revenue goes, for one period (a row of a table).
+
+    revenue = cost of revenue + R&D + SG&A + other operating costs + operating income.
+    SG&A falls back to selling + G&A when only those are tagged (MSFT); cost of revenue falls
+    back to revenue - gross profit. Whatever the standard tags do not cover becomes "기타
+    영업비용" so the parts always add up to revenue (AMZN tags fulfillment etc. with its own
+    names). Returns {"parts": Series (label -> amount), "base": revenue or total cost,
+    "loss": bool, "exact": bool} or None.
+    """
+    rev = row.get("revenue")
+    opi = row.get("operating_income")
+    if rev is None or pd.isna(rev) or rev <= 0 or opi is None or pd.isna(opi):
+        return None
+
+    def val(key):
+        v = row.get(key)
+        return None if v is None or pd.isna(v) else float(v)
+
+    cogs = val("cost_of_revenue")
+    if cogs is None and val("gross_profit") is not None:
+        cogs = rev - val("gross_profit")
+    sga = val("sga")
+    if sga is None and (val("selling") is not None or val("gna") is not None):
+        sga = (val("selling") or 0.0) + (val("gna") or 0.0)
+    parts = {"매출원가": cogs, "연구개발비": val("rnd"), "판매관리비": sga}
+    parts = {k: v for k, v in parts.items() if v is not None and v > 0}
+    if not parts:
+        return None
+    total_cost = rev - opi
+    other = total_cost - sum(parts.values())
+    exact = True
+    if other > 0.005 * rev:
+        parts["기타 영업비용"] = other
+    elif other < -0.01 * rev:
+        exact = False  # tags overlap (e.g. R&D also inside SG&A): shares of the parts only
+    if opi > 0:
+        parts["영업이익"] = float(opi)
+        base = float(rev)
+    else:
+        base = sum(parts.values())
+    return {"parts": pd.Series(parts, dtype=float), "base": base, "loss": opi <= 0, "exact": exact}
