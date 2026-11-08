@@ -529,3 +529,29 @@ def test_cost_structure_adds_up_to_revenue():
     assert cs["parts"]["기타 영업비용"] == pytest.approx(716.9 - 80.0 - 356.4 - 11.2)
     loss = cost_structure(pd.Series({"revenue": 100.0, "operating_income": -10.0, "cost_of_revenue": 80.0}))
     assert loss["loss"] and "영업이익" not in loss["parts"] and loss["base"] == pytest.approx(110.0)
+
+
+def test_presented_costs_by_nature():
+    """DAL-like income statement: costs by nature between revenue and operating income, with
+    an abstract header and a 'Total operating expense' row that must not double count."""
+    from edger.business import presented_costs
+    col, prev = "2025-12-31 (FY)", "2024-12-31 (FY)"
+    rows = [
+        ("us-gaap_RevenuesAbstract", "Operating Revenue:", True, None, None),
+        ("us-gaap_RevenueFromContractWithCustomerExcludingAssessedTax", "Total operating revenue", False, 63.4, 61.6),
+        ("us-gaap_CostsAndExpensesAbstract", "Operating Expense:", True, None, None),
+        ("us-gaap_LaborAndRelatedExpense", "Salaries and related costs", False, 17.5, 16.2),
+        ("us-gaap_FuelCosts", "Aircraft fuel and related taxes", False, 9.8, 10.9),
+        ("dal_AncillaryBusinessesAndRefineryExpenses", "Ancillary businesses and refinery", False, 6.0, 5.8),
+        ("us-gaap_OtherCostAndExpenseOperating", "Other", False, 24.3, 22.7),
+        ("us-gaap_CostsAndExpenses", "Total operating expense", False, 57.6, 55.6),
+        ("us-gaap_OperatingIncomeLoss", "Operating Income", False, 5.8, 6.0),
+        ("us-gaap_InterestIncomeExpenseNonoperatingNet", "Interest expense, net", False, -0.7, -0.8),
+    ]
+    df = pd.DataFrame([{"concept": c, "label": l, "abstract": a, col: v, prev: p} for c, l, a, v, p in rows])
+    out = presented_costs(df)
+    assert out["exact"]
+    assert list(out["items"].index) == ["기타", "인건비", "연료비", "Ancillary businesses and refinery"]
+    assert out["items"][col].sum() == pytest.approx(57.6)
+    assert out["names"]["인건비"] == "Salaries and related costs"
+    assert out["operating_income"][col] == 5.8 and out["revenue"][prev] == 61.6

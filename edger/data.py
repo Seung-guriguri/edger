@@ -422,9 +422,17 @@ def fetch_business(ticker: str) -> dict:
     out = {"form": filing.form, "date": str(filing.filing_date), "url": filing.homepage_url,
            "overview": None, "breakdowns": {}}
     try:
-        out["breakdowns"] = business.breakdowns(filing.xbrl().facts.to_dataframe())
+        xbrl = filing.xbrl()
+        out["breakdowns"] = business.breakdowns(xbrl.facts.to_dataframe())
     except Exception:
-        pass
+        xbrl = None
+    out["costs"] = None
+    if xbrl is not None:
+        try:
+            stmt = xbrl.statements.income_statement()
+            out["costs"] = business.presented_costs(stmt.to_dataframe(view="summary"))
+        except Exception:
+            pass
     try:
         obj = filing.obj()
         text = obj.business if filing.form.startswith("10-K") else obj.get("Item 4")

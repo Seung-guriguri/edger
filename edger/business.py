@@ -218,3 +218,118 @@ def overview(text: str | None, max_chars: int = 1400) -> str | None:
         out.append(p)
         size += len(p)
     return "\n\n".join(out)
+
+
+# ---------------------------------------------------------------- costs as presented
+# Korean names for common cost lines (concept local name -> label). Lines not listed keep the
+# company's own English label.
+COST_NAMES = {
+    "LaborAndRelatedExpense": "인건비", "SalariesAndWages": "인건비", "EmployeeBenefitsExpense": "인건비",
+    "LaborAndRelatedExpenseAndOtherBenefits": "인건비", "SalariesWagesAndOfficersCompensation": "인건비",
+    "OtherLaborRelatedExpenses": "성과급 등 기타 인건비",
+    "FuelCosts": "연료비", "AircraftFuelAndRelatedTaxes": "연료비", "FuelAndPurchasedPowerCostOfSales": "연료·구매전력",
+    "CostOfPurchasedPower": "구매 전력비", "UtilitiesOperatingExpenseFuelAndPurchasedPower": "연료·구매전력",
+    "RawMaterialsAndConsumablesUsed": "원재료비",
+    "DepreciationDepletionAndAmortization": "감가상각비", "DepreciationAndAmortization": "감가상각비",
+    "DepreciationExpense": "감가상각비", "DepreciationAndAmortisationExpense": "감가상각비",
+    "CostOfRevenue": "매출원가", "CostOfGoodsAndServicesSold": "매출원가", "CostOfGoodsSold": "매출원가",
+    "CostOfSales": "매출원가", "CostOfServices": "서비스 원가",
+    "ResearchAndDevelopmentExpense": "연구개발비", "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost": "연구개발비",
+    "SellingGeneralAndAdministrativeExpense": "판매관리비", "SellingAndMarketingExpense": "판매·마케팅비",
+    "GeneralAndAdministrativeExpense": "일반관리비", "AdministrativeExpense": "일반관리비",
+    "SellingExpense": "판매비", "DistributionCosts": "물류·판매비",
+    "ProfessionalAndContractServicesExpense": "외주 용역비", "LandingFeesAndOtherRentals": "공항 이용료·임차료",
+    "AircraftMaintenanceMaterialsAndRepairs": "항공기 정비비", "AircraftRental": "항공기 임차료",
+    "AirlineCapacityPurchaseArrangements": "지역 항공사 위탁비", "CostOfServicesCatering": "기내 서비스",
+    "FeeAndCommissionExpense": "운항비·수수료", "OperatingLeasesRentExpenseNet": "임차료",
+    "AmortizationOfIntangibleAssets": "무형자산 상각", "RestructuringCharges": "구조조정비",
+    "OtherCostAndExpenseOperating": "기타", "OtherOperatingIncomeExpenseNet": "기타",
+    "TaxesExcludingIncomeAndExciseTaxes": "세금(법인세 제외)", "InsuranceExpense": "보험료",
+    "MarketingAndAdvertisingExpense": "광고비", "TechnologyServicesCosts": "기술 비용",
+}
+# Company-specific lines are named by label; common ones get a Korean name too.
+LABEL_NAMES = {
+    "fulfillment": "물류(풀필먼트)", "technology and infrastructure": "기술·인프라", "technology and content": "기술·콘텐츠",
+    "sales and marketing": "판매·마케팅비", "ship operating expenses": "선박 운영비", "vessel operating expenses": "선박 운영비",
+    "voyage expenses": "운항비", "purchased transportation": "외부 운송비", "fuel": "연료비",
+    "compensation and benefits": "인건비", "salaries and benefits": "인건비", "operating and maintenance": "운영·유지보수비",
+    "operation, maintenance and other": "운영·유지보수비", "property and other taxes": "재산세 등",
+    "food and paper": "식재료·포장재", "payroll and employee benefits": "인건비", "occupancy and other operating expenses": "점포 운영비",
+    "maintenance and repairs": "정비·수선비", "rentals": "임차료", "rent": "임차료", "marketing": "마케팅비",
+}
+_REVENUE_LOCAL = {c.split(":")[1] for c in REVENUE_CONCEPTS} | {
+    "Revenues", "RevenueFromRenderingOfServices", "RegulatedAndUnregulatedOperatingRevenue",
+    "RegulatedOperatingRevenue", "ElectricUtilityRevenue", "OperatingLeasesIncomeStatementLeaseRevenue"}
+_OPINC_LOCAL = {"OperatingIncomeLoss", "ProfitLossFromOperatingActivities"}
+_SUBTOTAL_LOCAL = {"GrossProfit", "CostsAndExpenses", "OperatingExpenses", "OperatingExpense",
+                   "CostOfGoodsAndServicesSoldAndOperatingExpenses", "BenefitsLossesAndExpenses"}
+
+
+def _local(concept: str) -> str:
+    return str(concept).replace(":", "_").split("_", 1)[-1]
+
+
+def presented_costs(income: pd.DataFrame) -> dict | None:
+    """Operating cost lines exactly as the company presents them on the income statement
+    (by nature for airlines, shipping, utilities and many IFRS filers; by function otherwise).
+
+    ``income`` is edgartools ``Statement.to_dataframe()`` (concept, label, abstract, period
+    columns). Lines between revenue and operating income are taken; subtotals are removed by
+    choosing the set of lines that sums to total operating cost (revenue - operating income).
+    Returns {"periods": [column...], "items": DataFrame(label x period), "revenue": Series,
+    "operating_income": Series, "names": {label: original}} or None.
+    """
+    if income is None or income.empty or "concept" not in income:
+        return None
+    import re
+
+    periods = [c for c in income.columns if re.match(r"^\d{4}-\d{2}-\d{2}", str(c))]
+    periods = [c for c in periods if "(FY)" in str(c) or "(" not in str(c)][:3]
+    if not periods:
+        return None
+    rows = income.reset_index(drop=True)
+    locals_ = rows["concept"].map(_local)
+    if "dimension" in rows:
+        keep = ~rows["dimension"].fillna(False).astype(bool)
+        rows, locals_ = rows[keep].reset_index(drop=True), locals_[keep].reset_index(drop=True)
+    rev_idx = [i for i, c in enumerate(locals_) if c in _REVENUE_LOCAL]
+    op_idx = [i for i, c in enumerate(locals_) if c in _OPINC_LOCAL]
+    if not rev_idx or not op_idx:
+        return None
+    op_i = op_idx[0]
+    rev_before = [i for i in rev_idx if i < op_i]
+    if not rev_before:
+        return None
+    # the revenue total is the largest revenue line above operating income
+    latest = periods[0]
+    rev_i = max(rev_before, key=lambda i: pd.to_numeric(rows.loc[i, latest], errors="coerce") or 0)
+    revenue = pd.to_numeric(rows.loc[rev_i, periods], errors="coerce")
+    opinc = pd.to_numeric(rows.loc[op_i, periods], errors="coerce")
+    block = rows.iloc[max(rev_before) + 1:op_i]
+    block = block[~block.get("abstract", False).fillna(False).astype(bool)]
+    block = block[~block["concept"].map(_local).isin(_SUBTOTAL_LOCAL | _REVENUE_LOCAL)]
+    block = block[~block["label"].astype(str).str.lower().str.startswith("total")]
+    if block.empty:
+        return None
+    values = block.set_index(block.index)[periods].apply(pd.to_numeric, errors="coerce").abs()
+    total_cost = float(revenue[latest] - opinc[latest])
+    lines = values[latest].dropna()
+    members, exact = pick_members(lines, total_cost)
+    if not members:
+        return None
+    chosen = block.loc[members]
+    names, labels = {}, []
+    for _, r in chosen.iterrows():
+        orig = str(r["label"]).strip()
+        key = orig.lower().replace("&", "and").rstrip(":").strip()
+        key = " ".join(key.split())
+        kr = COST_NAMES.get(_local(r["concept"])) or LABEL_NAMES.get(key)
+        name = kr or orig
+        labels.append(name)
+        names[name] = orig
+    labels = _unique(labels)
+    items = values.loc[members]
+    items.index = labels
+    items = items.sort_values(latest, ascending=False)
+    return {"periods": periods, "items": items, "revenue": revenue, "operating_income": opinc,
+            "names": dict(zip(labels, [names.get(l.split(" (")[0], l) for l in labels])), "exact": exact}

@@ -665,7 +665,7 @@ def _business(ticker: str, currency: str, mode: str, annual: pd.DataFrame | None
     try:
         _render_mix(b, biz, source, currency, mode)
     finally:
-        _costs(annual if annual is not None else pd.DataFrame(), currency, mode, business)
+        _costs(biz, annual if annual is not None else pd.DataFrame(), currency, mode, business)
 
 
 def _render_mix(b: dict, biz: dict, source: str, currency: str, mode: str) -> None:
@@ -713,46 +713,89 @@ def _render_mix(b: dict, biz: dict, source: str, currency: str, mode: str) -> No
         st.caption("항목 합이 전체 매출과 달라 차액을 '기타(미분류)'로 표시했습니다 (부문 간 내부거래 제거 등).")
 
 
-COST_ORDER = ["매출원가", "연구개발비", "판매관리비", "기타 영업비용", "영업이익"]
+MAX_COST_SLICES = 6  # cost slices incl. the grey 기타; operating income comes on top
 
 
-def _costs(annual: pd.DataFrame, currency: str, mode: str, business: str) -> None:
-    """Where revenue goes: cost of revenue, R&D, SG&A, other operating costs, operating income."""
-    if business != "general" or annual.empty:
-        return  # banks, insurers and REITs do not report costs in this shape
-    cs = cost_structure(annual.iloc[-1])
-    if cs is None:
-        return
-    prev = cost_structure(annual.iloc[-2]) if len(annual) > 1 else None
-    parts = cs["parts"].reindex([k for k in COST_ORDER if k in cs["parts"].index])
-    label = annual["label"].iloc[-1]
-    section("비용 구조", f"{label} · 매출 100 기준" if not cs["loss"] else f"{label} · 영업손실",
-            key="costs",
-            info="손익계산서의 표준 항목으로 매출이 어디에 쓰였는지 나눕니다: 매출원가, 연구개발비, "
-                 "판매관리비(없으면 판매비 + 일반관리비), 영업이익. 표준 항목으로 설명되지 않는 나머지는 "
-                 "'기타 영업비용'입니다(회사 고유 항목, 구조조정비 등). 영업손실이면 비용끼리의 비중만 보여줍니다.")
-    p = charts.PALETTE[mode]
-    # fixed colours per cost type, so the same kind of cost looks the same for every company
-    color_of = {"매출원가": p["series"][0], "연구개발비": p["series"][1], "판매관리비": p["series"][2],
-                "기타 영업비용": charts.OTHER[mode], "영업이익": p["series"][3]}
-    colors = [color_of[k] for k in parts.index]
-    plot(charts.donut(parts, mode, "매출" if not cs["loss"] else "총비용", fmt.money(cs["base"], currency),
-                      colors=colors, hover_values=[fmt.money(v, currency) for v in parts.values]))
+def _costs(biz: dict, annual: pd.DataFrame, currency: str, mode: str, business: str) -> None:
+    """Where revenue goes. Preferably the cost lines exactly as the company presents them on
+    its income statement — by nature (labor, fuel...) for airlines, shipping, logistics,
+    restaurants and many IFRS filers, by function (cost of sales, R&D, SG&A) otherwise. Falls
+    back to the by-function split from standard tags when the presented lines do not add up."""
+    if business in ("bank", "insurance"):
+        return  # their expenses are not a split of revenue in this sense
+    presented = biz.get("costs") if biz else None
+    if presented and presented.get("exact"):
+        p0 = presented["periods"][0]
+        p1 = presented["periods"][1] if len(presented["periods"]) > 1 else None
+        items = presented["items"][p0].dropna()
+        items = items[items > 0.0005 * float(presented["revenue"][p0])]  # drop ~0 lines (noise)
+        revenue, opinc = float(presented["revenue"][p0]), float(presented["operating_income"][p0])
+        prev_rev = float(presented["revenue"][p1]) if p1 is not None else None
+        names = presented.get("names", {})
+        end = pd.Timestamp(str(p0)[:10])
+        label, source = f"FY{(end - pd.Timedelta(days=7)).year % 100:02d}", "회사 공시 항목"
+        prev_items = presented["items"][p1] if p1 is not None else None
+    else:
+        cs = cost_structure(annual.iloc[-1]) if not annual.empty else None
+        if cs is None:
+            section("비용 구조", key="costs")
+            st.caption("공시된 비용 항목의 합이 총 영업비용과 맞지 않거나(유틸리티 등) 영업이익 항목이 없어(리츠 등) "
+                       "비용 비중을 표시하지 않습니다. 틀린 비중을 보여주지 않기 위해서입니다.")
+            return
+        items = cs["parts"].drop(labels=["영업이익"], errors="ignore")
+        revenue = float(annual["revenue"].iloc[-1])
+        opinc = float(annual["operating_income"].iloc[-1])
+        prev = cost_structure(annual.iloc[-2]) if len(annual) > 1 else None
+        prev_rev = float(annual["revenue"].iloc[-2]) if prev is not None else None
+        prev_items = prev["parts"] if prev is not None else None
+        names, label, source = {}, annual["label"].iloc[-1], "표준 항목(기능별)"
+
+    loss = opinc <= 0
+    base = revenue if not loss else float(items.sum())
+    folded = charts.fold_parts(items, MAX_COST_SLICES)
+    pal = charts.PALETTE[mode]
+    color_of, slot = {}, 0
+    for name in folded.index:
+        if str(name).startswith("기타"):
+            color_of[name] = charts.OTHER[mode]
+        else:
+            color_of[name] = pal["series"][slot]
+            slot += 1
+    parts = folded.copy()
+    if not loss:
+        parts["영업이익"] = opinc
+        color_of["영업이익"] = pal["series"][6]  # fixed colour for the profit slice
+    section("비용 구조", f"{label} · {'매출 100 기준' if not loss else '영업손실 · 비용끼리 비중'}", key="costs",
+            info="손익계산서에서 매출과 영업이익 사이의 비용 항목을 회사가 공시한 그대로 나눕니다. 항공·해운·물류·외식"
+                 "처럼 **성격별**(인건비·연료비…)로 공시하는 회사는 그렇게, 애플처럼 **기능별**(매출원가·연구개발·판관비)로 "
+                 "공시하는 회사는 그렇게 나옵니다. 인건비를 따로 공시하지 않는 회사는 인건비가 나오지 않습니다.  \n\n"
+                 "공시 항목의 합이 총 영업비용과 맞지 않으면 표준 항목(기능별)으로 대신 보여줍니다.")
+    plot(charts.donut(parts, mode, "매출" if not loss else "총비용", fmt.money(base, currency),
+                      colors=[color_of[k] for k in parts.index],
+                      hover_values=[fmt.money(v, currency) for v in parts.values]))
     rows = []
-    for name, v in parts.items():
-        ratio = v / cs["base"]
-        delta, tone = None, None
-        if prev is not None and name in prev["parts"].index:
-            d = ratio - prev["parts"][name] / prev["base"]
-            delta = f"{d * 100:+.1f}%p 전년 대비"
-            if name == "영업이익":
-                tone = "good" if d >= 0 else "bad"
-        rows.append({"label": name, "value": fmt.money(v, currency), "swatch": color_of[name],
-                     "note": f"매출의 {ratio * 100:.1f}%" if not cs["loss"] else f"총비용의 {ratio * 100:.1f}%",
-                     "delta": delta, "tone": tone})
+    for name, v in list(items.sort_values(ascending=False).items()) + ([("영업이익", opinc)] if not loss else []):
+        ratio = v / base
+        delta = tone = None
+        if prev_items is not None and prev_rev:
+            pv = prev_items.get(name) if name != "영업이익" else None
+            if name == "영업이익" and biz and presented and presented.get("exact") and p1 is not None:
+                pv = float(presented["operating_income"][p1])
+            elif name == "영업이익" and not (presented and presented.get("exact")) and len(annual) > 1:
+                pv = float(annual["operating_income"].iloc[-2])
+            if pv is not None and pd.notna(pv):
+                d = ratio - pv / prev_rev
+                delta = f"{d * 100:+.1f}%p 전년 대비" if abs(d) >= 0.0005 else "변화 없음"
+                tone = ("good" if d >= 0 else "bad") if name == "영업이익" else None
+        orig = names.get(name)
+        note = f"매출의 {ratio * 100:.1f}%" if not loss else f"총비용의 {ratio * 100:.1f}%"
+        if orig and orig.lower() != str(name).lower():
+            note += f" · {orig}"
+        rows.append({"label": str(name), "value": fmt.money(v, currency), "note": note, "delta": delta,
+                     "tone": tone, "swatch": color_of.get(name, color_of.get("기타", charts.OTHER[mode]))})
     metric_rows(rows)
-    if not cs["exact"]:
-        st.caption("공시 항목끼리 일부 겹쳐(예: 판관비 안에 연구개발비 포함) 합이 매출과 정확히 맞지 않습니다.")
+    st.caption(f"출처: {source}" + (" · 매출원가 안에 인건비·원재료비가 섞여 있어 성격별 비중은 공시되지 않습니다."
+                                    if source.startswith("표준") or "매출원가" in items.index else ""))
 
 
 # ---------------------------------------------------------------- 배당
