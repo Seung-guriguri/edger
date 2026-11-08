@@ -8,11 +8,12 @@ import plotly.graph_objects as go
 from . import fmt
 
 # Reference categorical palette (validated light/dark steps) + diverging poles.
+# Categorical order is fixed (never cycled): a ticker keeps its color while others come and go.
 PALETTE = {
-    "light": {"series": ["#2a78d6", "#eb6834", "#1baf7a"], "pos": "#2a78d6", "neg": "#e34948",
-              "grid": "rgba(11,11,11,0.08)", "ink2": "#52514e"},
-    "dark": {"series": ["#3987e5", "#d95926", "#199e70"], "pos": "#3987e5", "neg": "#e66767",
-             "grid": "rgba(240,239,236,0.10)", "ink2": "#c3c2b7"},
+    "light": {"series": ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"], "pos": "#2a78d6",
+              "neg": "#e34948", "grid": "rgba(11,11,11,0.08)", "ink2": "#52514e"},
+    "dark": {"series": ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181"], "pos": "#3987e5",
+             "neg": "#e66767", "grid": "rgba(240,239,236,0.10)", "ink2": "#c3c2b7"},
 }
 
 PLOTLY_CONFIG = {"displayModeBar": False, "scrollZoom": False, "responsive": True}
@@ -98,4 +99,63 @@ def insider_monthly(trades: pd.DataFrame, mode: str) -> go.Figure:
     fig = _base(fig, mode, height=240)
     fig.update_layout(barmode="relative")
     fig.update_yaxes(tickprefix="$", ticksuffix=suffix)
+    return fig
+
+
+def price_line(prices: pd.Series, mode: str, currency: str = "USD") -> go.Figure:
+    p = PALETTE[mode]
+    sym = "$" if currency == "USD" else ""
+    fig = go.Figure(go.Scatter(
+        x=prices.index, y=prices.values, mode="lines", line=dict(width=2, color=p["series"][0]),
+        hovertemplate=f"%{{x|%Y-%m-%d}}<br><b>{sym}%{{y:,.2f}}</b><extra></extra>",
+    ))
+    fig = _base(fig, mode, height=240)
+    fig.update_xaxes(type="date", tickformat="%y.%m", nticks=6)
+    fig.update_yaxes(tickprefix=sym, zeroline=False)
+    fig.update_layout(hovermode="x")
+    return fig
+
+
+def per_bars(per: pd.DataFrame, mode: str, current: float | None = None) -> go.Figure:
+    p = PALETTE[mode]
+    data = per.dropna(subset=["per"])
+    fig = go.Figure(go.Bar(
+        x=data["label"], y=data["per"], marker_color=p["series"][0],
+        customdata=[f"주가 ${r.price:,.2f} · EPS ${r.eps:,.2f}" for r in data.itertuples()],
+        hovertemplate="%{x} PER <b>%{y:.1f}배</b><br>%{customdata}<extra></extra>",
+    ))
+    fig = _base(fig, mode, height=230)
+    if current:
+        fig.add_hline(y=current, line=dict(color=p["ink2"], width=1, dash="dot"),
+                      annotation_text=f"현재 {current:.1f}배", annotation_position="top left",
+                      annotation_font=dict(size=11, color=p["ink2"]))
+    fig.update_yaxes(ticksuffix="배")
+    return fig
+
+
+def compare_lines(series: dict[str, pd.Series], mode: str, *, percent: bool, currency: str = "USD") -> go.Figure:
+    """One line per ticker over fiscal-year labels. ``series`` keeps the watchlist order."""
+    p = PALETTE[mode]
+    fig = go.Figure()
+    for i, (ticker, s) in enumerate(series.items()):
+        if s is None or s.dropna().empty:
+            continue
+        color = p["series"][i % len(p["series"])]
+        y = s * 100 if percent else s
+        text = [fmt.pct(v) if percent else fmt.money(v, currency) for v in s]
+        fig.add_trace(go.Scatter(
+            x=list(s.index), y=y, name=ticker, mode="lines+markers",
+            line=dict(width=2, color=color), marker=dict(size=8, color=color),
+            customdata=text, hovertemplate=f"{ticker} %{{customdata}}<extra></extra>",
+        ))
+    fig = _base(fig, mode, height=260)
+    if percent:
+        fig.update_yaxes(ticksuffix="%")
+    else:
+        top = max((float(s.abs().max()) for s in series.values() if s is not None and not s.dropna().empty), default=0)
+        div, suffix = fmt.scale_for(top)
+        for tr in fig.data:
+            tr.y = tuple(v / div if v is not None and not pd.isna(v) else None for v in tr.y)
+        fig.update_yaxes(ticksuffix=suffix, tickprefix="$" if currency == "USD" else "")
+    fig.update_layout(hovermode="x unified")
     return fig

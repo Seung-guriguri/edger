@@ -12,15 +12,25 @@ import numpy as np
 import pandas as pd
 
 TICKER = "DEMO"
+# ticker -> (name, random seed, starting revenue, margin offset)
+COMPANIES = {
+    "DEMO": ("Demo Robotics Inc.", 7, 18e9, 0.0),
+    "DEMOB": ("Bravo Cloud Corp.", 21, 6e9, 0.08),
+    "DEMOC": ("Charlie Retail Co.", 42, 60e9, -0.11),
+}
+
+
+def is_demo(ticker: str) -> bool:
+    return ticker.upper() in COMPANIES
 _FIRST_FY = 2016
 _LAST_FY = 2025
 
 
-def profile() -> dict:
+def profile(ticker: str = TICKER) -> dict:
     return {
-        "name": "Demo Robotics Inc. (예시 데이터)",
+        "name": f"{COMPANIES[ticker.upper()][0]} (예시 데이터)",
         "cik": 0,
-        "tickers": [TICKER],
+        "tickers": [ticker.upper()],
         "exchanges": ["Nasdaq"],
         "industry": "Industrial Machinery",
         "fiscal_year_end": "1231",
@@ -34,22 +44,23 @@ def _quarter_bounds(fy: int):
     return starts, ends
 
 
-def _company_facts_json() -> dict:
-    rng = np.random.default_rng(7)
+def _company_facts_json(ticker: str = TICKER) -> dict:
+    name, seed, revenue_start, margin_offset = COMPANIES[ticker.upper()]
+    rng = np.random.default_rng(seed)
     flows = {k: [] for k in ("Revenues", "GrossProfit", "OperatingIncomeLoss", "NetIncomeLoss",
                              "EarningsPerShareDiluted", "NetCashProvidedByUsedInOperatingActivities",
                              "PaymentsToAcquirePropertyPlantAndEquipment")}
     instants = {k: [] for k in ("CashAndCashEquivalentsAtCarryingValue", "Assets", "Liabilities",
                                 "StockholdersEquity")}
     shares = 1.2e9
-    revenue_fy = 18e9
+    revenue_fy = revenue_start
     assets = 40e9
     for fy in range(_FIRST_FY, _LAST_FY + 1):
         revenue_fy *= 1 + rng.normal(0.11, 0.07)
         q_weights = np.array([0.23, 0.24, 0.25, 0.28]) + rng.normal(0, 0.005, 4)
         q_weights /= q_weights.sum()
         gm = 0.42 + rng.normal(0, 0.015)
-        om = 0.17 + 0.006 * (fy - _FIRST_FY) + rng.normal(0, 0.02)
+        om = 0.17 + margin_offset + 0.006 * (fy - _FIRST_FY) + rng.normal(0, 0.02)
         if fy == 2020:
             om -= 0.12  # a bad year so the charts show a dip
         nm = om * 0.78
@@ -100,13 +111,20 @@ def _company_facts_json() -> dict:
         for r in rows:
             r["accn"] = f"0000000000-{r['fy'] % 100:02d}-{r['fp']}"
         usgaap[concept] = {"label": concept, "units": {unit: rows}}
-    return {"cik": 0, "entityName": profile()["name"], "facts": {"us-gaap": usgaap}}
+    dei = {"EntityCommonStockSharesOutstanding": {"label": "Shares", "units": {"shares": [
+        {"end": f"{_LAST_FY + 1}-01-31", "val": shares, "fy": _LAST_FY, "fp": "FY", "form": "10-K",
+         "filed": f"{_LAST_FY + 1}-02-10", "accn": "0000000000-26-FY"}]}}}
+    return {"cik": 0, "entityName": name, "facts": {"us-gaap": usgaap, "dei": dei}}
 
 
-def facts_frame() -> pd.DataFrame:
+def entity_facts(ticker: str = TICKER):
     from edgar.entity.parser import EntityFactsParser
 
-    facts = EntityFactsParser.parse_company_facts(_company_facts_json())
+    return EntityFactsParser.parse_company_facts(_company_facts_json(ticker))
+
+
+def facts_frame(ticker: str = TICKER) -> pd.DataFrame:
+    facts = entity_facts(ticker)
     return facts.to_dataframe(include_metadata=True)
 
 
@@ -124,6 +142,7 @@ def filings_frame() -> pd.DataFrame:
     df = pd.DataFrame(rows, columns=["form", "filing_date", "report_date", "description"])
     df["filing_date"] = pd.to_datetime(df["filing_date"])
     df["url"] = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&type=10-K"
+    df["accession"] = [f"0000000000-{d:%y}-{i:06d}" for i, d in enumerate(df["filing_date"])]
     return df.sort_values("filing_date", ascending=False).reset_index(drop=True)
 
 
@@ -147,3 +166,30 @@ def insider_frame() -> pd.DataFrame:
             "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&type=4",
         })
     return pd.DataFrame(rows).sort_values("date", ascending=False).reset_index(drop=True)
+
+
+_LOREM = (
+    "Demo Robotics designs and manufactures industrial robots and motion-control software "
+    "for automotive, electronics and logistics customers. Revenue is generated from hardware "
+    "sales, recurring software subscriptions and field services. "
+)
+
+
+def filing_sections(form: str) -> list[dict]:
+    base = form.replace("/A", "")
+    if base == "8-K":
+        return [
+            {"title": "Item 2.02 · 실적 발표", "text": "On October 28, Demo Robotics announced results "
+             "for the quarter. Revenue grew 16% year over year to $14.4 billion ($ amounts in USD)."},
+            {"title": "보도자료 (EX-99)", "text": _LOREM * 6},
+        ]
+    if base == "10-K":
+        return [
+            {"title": "사업 개요", "text": "## Overview\n\n" + _LOREM * 12},
+            {"title": "리스크 요인", "text": "Our business depends on a small number of large customers. "
+             * 20},
+            {"title": "경영진 분석 (MD&A)", "text": _LOREM * 8},
+        ]
+    if base == "10-Q":
+        return [{"title": "경영진 분석 (MD&A)", "text": _LOREM * 6}]
+    return [{"title": "본문", "text": _LOREM * 3}]

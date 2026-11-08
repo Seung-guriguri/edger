@@ -67,3 +67,40 @@ def test_empty_facts():
 ])
 def test_money(value, expected):
     assert fmt.money(value) == expected
+
+
+def test_ttm_sums_last_four_quarters(facts):
+    from edger.metrics import ttm
+    q, _ = build_table(facts, "quarterly", 12)
+    annual, _ = build_table(facts, "annual", 10)
+    t = ttm(q)
+    assert t["revenue"] == pytest.approx(annual["revenue"].iloc[-1], rel=1e-9)  # Q1..Q4 2025 = FY25
+
+
+def test_ttm_rejects_gaps(facts):
+    from edger.metrics import ttm
+    q, _ = build_table(facts, "quarterly", 12)
+    assert ttm(q.drop(q.index[-2])) is None
+
+
+def test_cagr():
+    from edger.metrics import cagr
+    t = pd.DataFrame({"revenue": [100.0, 110.0, 121.0, 133.1]})
+    assert cagr(t, "revenue", 3) == pytest.approx(0.10)
+    assert cagr(t, "revenue", 5) is None
+    assert cagr(pd.DataFrame({"x": [-1.0, 2.0]}), "x", 1) is None
+
+
+def test_valuation_multiples():
+    from edger.metrics import valuation
+    v = valuation(1000.0, {"net_income": 50.0, "revenue": 500.0, "fcf": 40.0, "operating_income": 80.0},
+                  pd.Series({"equity": 250.0, "debt": 100.0, "cash": 60.0}))
+    assert v["per"] == 20 and v["psr"] == 2 and v["pbr"] == 4
+    assert v["ev"] == 1040 and v["ev_ebit"] == 13 and v["fcf_yield"] == pytest.approx(0.04)
+    assert valuation(1000.0, {"net_income": -5.0}, None)["per"] is None  # loss-making: no PER
+
+
+def test_deep_metrics_present(facts):
+    table, _ = build_table(facts, "annual", 8)
+    assert table["roe"].notna().all() and table["roic"].notna().all()
+    assert table["net_debt"].isna().all()  # demo has no debt tags: unknown, not "-cash"

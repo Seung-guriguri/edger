@@ -22,7 +22,7 @@ class Metric:
     label: str
     kind: Literal["flow", "instant"]  # flow = duration (P&L, cash flow), instant = balance sheet
     concepts: tuple[str, ...]
-    per_share: bool = False
+    unit: Literal["money", "per_share", "shares"] = "money"
 
 
 METRICS: tuple[Metric, ...] = (
@@ -56,7 +56,7 @@ METRICS: tuple[Metric, ...] = (
         "us-gaap:EarningsPerShareBasic",
         "ifrs-full:DilutedEarningsLossPerShare",
         "ifrs-full:BasicEarningsLossPerShare",
-    ), per_share=True),
+    ), unit="per_share"),
     Metric("ocf", "영업현금흐름", "flow", (
         "us-gaap:NetCashProvidedByUsedInOperatingActivities",
         "us-gaap:NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
@@ -87,10 +87,42 @@ METRICS: tuple[Metric, ...] = (
         "ifrs-full:EquityAttributableToOwnersOfParent",
         "ifrs-full:Equity",
     )),
+    Metric("pretax_income", "세전이익", "flow", (
+        "us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+        "us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+        "us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesDomestic",
+        "ifrs-full:ProfitLossBeforeTax",
+    )),
+    Metric("income_tax", "법인세", "flow", (
+        "us-gaap:IncomeTaxExpenseBenefit",
+        "ifrs-full:IncomeTaxExpenseContinuingOperations",
+    )),
+    Metric("shares_diluted", "희석주식수", "flow", (
+        "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding",
+        "us-gaap:WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
+        "ifrs-full:AdjustedWeightedAverageShares",
+    ), unit="shares"),
+    Metric("debt_long", "장기차입금", "instant", (
+        "us-gaap:LongTermDebtNoncurrent",
+        "us-gaap:LongTermDebt",
+        "us-gaap:LongTermDebtAndCapitalLeaseObligations",
+        "ifrs-full:NoncurrentPortionOfNoncurrentBorrowings",
+        "ifrs-full:NoncurrentBorrowings",
+    )),
+    Metric("debt_short", "단기차입금", "instant", (
+        "us-gaap:DebtCurrent",
+        "us-gaap:LongTermDebtCurrent",
+        "us-gaap:ShortTermBorrowings",
+        "ifrs-full:CurrentBorrowings",
+    )),
 )
 
+# Shares outstanding from the filing cover page (dei); used for market cap.
+SHARES_OUTSTANDING_CONCEPTS = ("dei:EntityCommonStockSharesOutstanding",)
+
 METRIC_BY_KEY = {m.key: m for m in METRICS}
-ALL_CONCEPTS: frozenset[str] = frozenset(c for m in METRICS for c in m.concepts)
+ALL_CONCEPTS: frozenset[str] = frozenset(
+    [c for m in METRICS for c in m.concepts] + list(SHARES_OUTSTANDING_CONCEPTS))
 
 # Labels for derived columns, used by the UI.
 DERIVED_LABELS = {
@@ -99,6 +131,11 @@ DERIVED_LABELS = {
     "operating_margin": "영업이익률",
     "net_margin": "순이익률",
     "debt_ratio": "부채비율",
+    "debt": "총차입금",
+    "net_debt": "순차입금",
+    "fcf_margin": "FCF 마진",
+    "roe": "ROE",
+    "roic": "ROIC",
 }
 
 _ANNUAL_DAYS = (330, 400)
@@ -127,9 +164,11 @@ def detect_currency(facts: pd.DataFrame) -> str:
     return str(units.value_counts().idxmax())
 
 
-def _unit_ok(units: pd.Series, currency: str, per_share: bool) -> pd.Series:
-    if per_share:
+def _unit_ok(units: pd.Series, currency: str, kind: str) -> pd.Series:
+    if kind == "per_share":
         return units.str.startswith(currency) & units.str.contains("share", case=False)
+    if kind == "shares":
+        return units == "shares"
     return units == currency
 
 
@@ -184,7 +223,7 @@ def metric_series(facts: pd.DataFrame, metric: Metric, period: Period, currency:
     merged = pd.Series(dtype=float)
     for concept in metric.concepts:
         sub = facts[(facts["concept"] == concept)
-                    & _unit_ok(facts["unit"], currency, metric.per_share)]
+                    & _unit_ok(facts["unit"], currency, metric.unit)]
         if sub.empty:
             continue
         s = _flow_series(sub, period) if metric.kind == "flow" else _instant_series(sub)
@@ -239,6 +278,22 @@ def build_table(raw_facts: pd.DataFrame, period: Period = "annual", n: int = 8) 
         table["liabilities"] = table["assets"] - table["equity"]
     eq = table["equity"].where(table["equity"] > 0)
     table["debt_ratio"] = table["liabilities"] / eq
+    table["fcf_margin"] = table["fcf"] / rev
+    table["debt"] = table["debt_long"].fillna(0) + table["debt_short"].fillna(0)
+    table.loc[table["debt_long"].isna() & table["debt_short"].isna(), "debt"] = np.nan
+    table["net_debt"] = table["debt"] - table["cash"].fillna(0)  # unknown when debt is untagged
+    if period == "annual":
+        # Returns use average capital over the year; the first row falls back to year-end.
+        avg_eq = ((table["equity"] + table["equity"].shift(1)) / 2).fillna(table["equity"])
+        table["roe"] = table["net_income"] / avg_eq.where(avg_eq > 0)
+        tax_rate = (table["income_tax"] / table["pretax_income"].where(table["pretax_income"] > 0)).clip(0, 0.5)
+        nopat = table["operating_income"] * (1 - tax_rate.fillna(0.21))
+        invested = table["equity"] + table["debt"].fillna(0) - table["cash"].fillna(0)
+        avg_inv = ((invested + invested.shift(1)) / 2).fillna(invested)
+        table["roic"] = nopat / avg_inv.where(avg_inv > 0)
+    else:
+        table["roe"] = np.nan
+        table["roic"] = np.nan
 
     table.insert(0, "label", [period_label(d, period) for d in table.index])
     table.index.name = "period_end"
@@ -257,3 +312,94 @@ def change(table: pd.DataFrame, col: str) -> tuple[float | None, float | None]:
         return latest, None
     prev = float(s.iloc[-2])
     return latest, (latest - prev) / abs(prev)
+
+
+def cagr(table: pd.DataFrame, col: str, years: int) -> float | None:
+    """Compound annual growth over ``years`` for an annual table; None if not computable."""
+    if table.empty or col not in table:
+        return None
+    s = table[col].dropna()
+    if len(s) <= years:
+        return None
+    start, end = float(s.iloc[-1 - years]), float(s.iloc[-1])
+    if start <= 0 or end <= 0:
+        return None
+    return (end / start) ** (1 / years) - 1
+
+
+TTM_FLOWS = ("revenue", "gross_profit", "operating_income", "net_income", "eps", "ocf", "capex", "fcf")
+
+
+def ttm(quarterly: pd.DataFrame) -> dict | None:
+    """Sum of the latest four consecutive quarters for flow metrics.
+
+    Returns None when the last four quarters are not contiguous (e.g. missing filings).
+    """
+    if quarterly is None or len(quarterly) < 4:
+        return None
+    last4 = quarterly.tail(4)
+    gaps = pd.Series(last4.index).diff().dt.days.dropna()
+    if not gaps.between(80, 100).all():
+        return None
+    out = {"label": f"TTM ({last4['label'].iloc[-1]})", "end": last4.index[-1]}
+    for col in TTM_FLOWS:
+        vals = last4[col]
+        out[col] = float(vals.sum()) if vals.notna().all() else None
+    return out
+
+
+def latest_shares_outstanding(raw_facts: pd.DataFrame) -> float | None:
+    """Latest cover-page shares outstanding. Multi-class companies report one value per
+    class on the same date, so values sharing the latest date are summed."""
+    if raw_facts is None or raw_facts.empty:
+        return None
+    sub = raw_facts[raw_facts["concept"].isin(SHARES_OUTSTANDING_CONCEPTS) & raw_facts["numeric_value"].notna()]
+    if sub.empty:
+        return None
+    sub = sub.assign(period_end=pd.to_datetime(sub["period_end"]), filing_date=pd.to_datetime(sub["filing_date"]))
+    latest_end = sub["period_end"].max()
+    same = sub[sub["period_end"] == latest_end]
+    same = same[same["filing_date"] == same["filing_date"].max()]
+    return float(same["numeric_value"].drop_duplicates().sum())
+
+
+def valuation(market_cap: float | None, flows: dict | None, balance: pd.Series | None) -> dict:
+    """Valuation multiples from market cap, trailing flows and the latest balance sheet."""
+    out = {k: None for k in ("per", "psr", "pbr", "fcf_yield", "ev", "ev_ebit")}
+    if not market_cap or market_cap <= 0 or not flows:
+        return out
+
+    def ratio(num, den, positive_den=True):
+        if num is None or den is None or pd.isna(num) or pd.isna(den):
+            return None
+        if positive_den and den <= 0:
+            return None
+        return num / den
+
+    out["per"] = ratio(market_cap, flows.get("net_income"))
+    out["psr"] = ratio(market_cap, flows.get("revenue"))
+    out["fcf_yield"] = ratio(flows.get("fcf"), market_cap)
+    if balance is not None:
+        out["pbr"] = ratio(market_cap, balance.get("equity"))
+        debt = balance.get("debt")
+        cash = balance.get("cash")
+        out["ev"] = market_cap + (0 if debt is None or pd.isna(debt) else debt) - (0 if cash is None or pd.isna(cash) else cash)
+        out["ev_ebit"] = ratio(out["ev"], flows.get("operating_income"))
+    return out
+
+
+def historical_per(annual: pd.DataFrame, prices: pd.Series) -> pd.DataFrame:
+    """PER at each fiscal year end: closing price on/just before period end ÷ diluted EPS."""
+    if annual.empty or prices is None or prices.empty:
+        return pd.DataFrame(columns=["label", "price", "eps", "per"])
+    prices = prices.sort_index()
+    rows = []
+    for end, row in annual.iterrows():
+        before = prices[prices.index <= end]
+        if before.empty or (end - before.index[-1]).days > 10:
+            continue
+        price = float(before.iloc[-1])
+        eps = row.get("eps")
+        per = price / eps if eps is not None and pd.notna(eps) and eps > 0 else None
+        rows.append({"label": row["label"], "price": price, "eps": eps, "per": per})
+    return pd.DataFrame(rows)
