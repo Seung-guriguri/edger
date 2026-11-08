@@ -1,0 +1,4 @@
+edgartools>=5.62,<6
+streamlit>=1.50,<2
+plotly>=6.0,<8
+pandas>=2.2
