@@ -3,3 +3,15 @@ toolbarMode = "minimal"
 
 [server]
 headless = true
+
+[browser]
+gatherUsageStats = false
+
+# Accent for selected tabs / buttons / pills. Blue (the chart series colour) instead of
+# Streamlit's default red: red already means "down / worse / sell" in this app.
+# Separate light and dark values keep the automatic dark mode.
+[theme.light]
+primaryColor = "#2a78d6"
+
+[theme.dark]
+primaryColor = "#3987e5"
