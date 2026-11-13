@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from . import charts, data, fmt, watchlist
-from .metrics import (DERIVED_LABELS, METRIC_BY_KEY, cagr, cost_structure, dividend_history,
+from .metrics import (DERIVED_LABELS, METRIC_BY_KEY, cagr, cost_structure, dividend_history, income_flow,
                       turnaround, yoy, yoy_prev)
 from .ui import (kpi_cards, load_business, load_per_history, metric_rows, section, tradingview_chart,
                  tradingview_symbol, load_dividends, retry_prices, load_filing_sections, load_filings, load_insiders, load_prices,
@@ -385,6 +385,8 @@ def _financials(ticker: str, table: pd.DataFrame, annual: pd.DataFrame, period_k
             plot(charts.margin_lines(table, returns, mode))
         elif period_key == "quarterly":
             st.caption("자본 수익률은 1년치 실적이 필요해 연간·TTM 기준에서 보여줍니다.")
+    elif view == "흐름":
+        _income_flow(ticker, table, period_key, currency, mode, business)
     elif view == "안정성":
         _stability(ticker, annual, currency, business)
     else:
@@ -394,7 +396,70 @@ def _financials(ticker: str, table: pd.DataFrame, annual: pd.DataFrame, period_k
             _statements(ticker, period_key, currency)
 
 
-FIN_VIEWS = ["실적", "수익성", "안정성", "재무제표"]
+FIN_VIEWS = ["실적", "흐름", "수익성", "안정성", "재무제표"]
+
+
+def _income_flow(ticker: str, table: pd.DataFrame, period_key: str, currency: str, mode: str,
+                 business: str) -> None:
+    """Income statement as a Sankey for the selected period (annual / TTM / quarter)."""
+    if business in ("bank", "insurance"):
+        st.info("은행·보험사는 매출에서 원가·비용을 빼는 구조가 아니라 손익 흐름 그래프를 그리지 않습니다.")
+        return
+    row = table.iloc[-1]
+    tag = {"annual": row["label"], "ttm": f"TTM {row['label']}", "quarterly": f"{row['label']} 분기"}[period_key]
+    cost_items = segments = None
+    source = "표준 항목"
+    if period_key == "annual":
+        # the latest annual report adds presented cost lines (labor, fuel...) and revenue segments
+        biz = load_business(ticker)
+        presented = biz.get("costs")
+        if presented and presented.get("exact"):
+            p0 = presented["periods"][0]
+            if abs((pd.Timestamp(str(p0)[:10]) - table.index[-1]).days) < 10:
+                cost_items = presented["items"][p0].dropna()
+                cost_items = cost_items[cost_items > 0.0005 * float(presented["revenue"][p0])]
+                source = "회사 공시 항목"
+        mix = biz.get("breakdowns") or {}
+        part = mix.get("product") or mix.get("segment")
+        if part is not None and part["values"].shape[1] and \
+                abs((part["values"].columns[-1] - table.index[-1]).days) < 10:
+            # a whole extra column: optional on a phone-width screen
+            if st.toggle(f"{part['title']}별 매출도 표시", key="flow_seg"):
+                segments = charts.fold_parts(part["values"].iloc[:, -1], 5)
+    flow = income_flow(row, cost_items, segments)
+    if flow is None:
+        st.info("매출이나 영업이익 항목이 없어 손익 흐름을 그릴 수 없습니다.")
+        return
+    section("손익 흐름", f"{tag} · {currency}", key="flow",
+            info="매출이 어디로 나가고 무엇이 남는지 보여줍니다. **파랑** = 매출·이익, **빨강** = 원가·비용·세금, "
+                 "**회색** = 들어오는 돈(사업부문 매출, 영업외 이익, 세금 환급). 각 이름 옆 %는 매출 대비 비중입니다.  \n\n"
+                 "연간 기준이면 최근 연간 보고서에서 사업부문 매출과 회사가 공시한 비용 항목(인건비·연료비 등)을 "
+                 "더해 그립니다. TTM·분기는 표준 항목(매출원가·연구개발비·판관비)으로 그리고 나머지는 '기타 영업비용'입니다.")
+    plot(charts.income_sankey(flow, mode, currency))
+    # every node with its amount and share of revenue (the chart labels only the larger ones)
+    rev = float(row["revenue"])
+    totals: dict[str, float] = {}
+    for src, tgt, v, k in flow["links"]:
+        totals[tgt] = totals.get(tgt, 0.0) + v
+    out: dict[str, float] = {}
+    for src, _, v, _ in flow["links"]:
+        out[src] = out.get(src, 0.0) + v
+    for n, v in out.items():  # inflows with no source: non-operating gains, segments...
+        totals.setdefault(n, v)
+    totals.update({n: v for n, v in flow.get("amounts", {}).items() if n in totals})
+    pal = charts.PALETTE[mode]
+    main = ["매출총이익", "영업이익", "순이익"]
+    rows = []
+    for name in [n for n in main if n in totals] + [n for n in totals if n not in main and n not in ("매출", "총비용")]:
+        kind = next((k for _, t, _, k in flow["links"] if t == name),
+                    "cost" if name == "영업손실" else "rev")
+        swatch = pal["series"][0] if name in main else (pal["neg"] if kind == "cost" else charts.OTHER[mode])
+        rows.append({"label": name, "value": fmt.money(totals[name], currency), "swatch": swatch,
+                     "note": f"매출의 {totals[name] / rev * 100:.1f}%"})
+    metric_rows(rows)
+    if flow["loss"]:
+        st.caption("영업손실이라 매출과 영업손실이 함께 총비용을 메우는 모양으로 그렸습니다.")
+    st.caption(f"출처: {source}")
 
 
 def business_kind(profile: dict) -> str:

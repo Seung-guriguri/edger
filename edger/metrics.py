@@ -999,3 +999,132 @@ def band_multiples(per: pd.Series) -> list[float]:
         if m not in out:
             out.append(m)
     return out
+
+
+# ---------------------------------------------------------------- income flow (Sankey)
+def income_flow(row: pd.Series, cost_items: pd.Series | None = None,
+                segments: pd.Series | None = None) -> dict | None:
+    """Links for an income-statement Sankey: where revenue goes, down to net income.
+
+    revenue -> gross profit + cost of revenue
+    gross profit -> operating income + each operating cost
+    operating income (+ non-operating gains, tax benefit) -> net income + income tax
+    (+ non-operating losses, other: minority interest, discontinued operations)
+
+    ``cost_items`` (label -> amount) are the operating cost lines as presented on the income
+    statement; when they include cost of revenue it splits off at the first step, otherwise
+    (airlines, shipping...) revenue goes straight to operating income and the cost lines.
+    ``segments`` (label -> revenue) feed revenue from the left.
+    Every link carries a kind: "rev" (revenue in), "profit" or "cost".
+    Returns {"links": [(source, target, value, kind)], "loss": bool} or None.
+    """
+    def val(key):
+        v = row.get(key)
+        return None if v is None or pd.isna(v) else float(v)
+
+    rev, opi = val("revenue"), val("operating_income")
+    if not rev or rev <= 0 or opi is None:
+        return None
+    links: list[tuple[str, str, float, str]] = []
+    R, GP, OP, NI = "매출", "매출총이익", "영업이익", "순이익"
+
+    if segments is not None and len(segments) >= 2:
+        seg = segments[segments > 0]
+        # only when the parts add up to revenue; otherwise the revenue node would not balance
+        if abs(float(seg.sum()) - rev) <= 0.015 * rev:
+            for name, v in seg.items():
+                # segment names live in their own column: suffix any clash with a cost line name
+                label = str(name) if str(name) not in ("기타",) else "기타 매출"
+                links.append((label, R, float(v), "rev"))
+
+    # operating costs: presented lines, else the standard tags
+    if cost_items is not None and len(cost_items):
+        items = {str(k): float(v) for k, v in cost_items.items() if v and v > 0}
+        # At most 5 named cost branches (plus cost of revenue); the rest, and any line the
+        # company itself calls "Other", fold into one "기타 영업비용" so it stays readable.
+        cogs_v = items.pop("매출원가", None)
+        other_v = items.pop("기타", 0.0)
+        ordered = sorted(items.items(), key=lambda kv: -kv[1])
+        other_v += sum(v for _, v in ordered[5:])
+        items = dict(ordered[:5])
+        if other_v > 0:
+            items["기타 영업비용"] = other_v
+        if cogs_v:
+            items = {"매출원가": cogs_v, **items}
+    else:
+        cogs = val("cost_of_revenue")
+        if cogs is None and val("gross_profit") is not None:
+            cogs = rev - val("gross_profit")
+        sga = val("sga")
+        if sga is None and (val("selling") or val("gna")):
+            sga = (val("selling") or 0.0) + (val("gna") or 0.0)
+        items = {k: v for k, v in (("매출원가", cogs), ("연구개발비", val("rnd")), ("판매관리비", sga))
+                 if v is not None and v > 0}
+    total_cost = rev - opi
+    other = total_cost - sum(items.values())
+    if other > 0.005 * rev:
+        items["기타 영업비용"] = items.get("기타 영업비용", 0.0) + other
+
+    loss = opi <= 0
+    cogs = items.pop("매출원가", None)
+    if loss:
+        # costs exceed revenue: revenue and the operating loss together pay for the costs
+        if cogs:
+            items = {"매출원가": cogs, **items}
+        links.append((R, "총비용", rev, "rev"))
+        links.append(("영업손실", "총비용", -opi, "cost"))
+        for name, v in items.items():
+            links.append(("총비용", name, v, "cost"))
+        return {"links": links, "loss": True}
+
+    top = R
+    if cogs:
+        gp = rev - cogs
+        links.append((R, "매출원가", cogs, "cost"))
+        links.append((R, GP, gp, "profit"))
+        top = GP
+    for name, v in items.items():
+        links.append((top, name, v, "cost"))
+    links.append((top, OP, opi, "profit"))
+
+    pretax, tax, ni = val("pretax_income"), val("income_tax"), val("net_income")
+    if pretax is None or ni is None or pretax <= 0 or ni <= 0:
+        return {"links": links, "loss": False}  # below-the-line loss: stop at operating income
+    # Below operating income there is no pretax column (one fewer column on a phone):
+    # operating income and any non-operating gain / tax benefit flow straight into tax,
+    # non-operating costs, minority interest etc. and net income.
+    tax = tax or 0.0
+    thr = 0.002 * rev
+    nonop = pretax - opi
+    sources = [[OP, opi, "profit"]]
+    sinks = []
+    if nonop > thr:
+        sources.append(["영업외 이익", nonop, "rev"])
+    elif nonop < -thr:
+        sinks.append(["영업외 비용", -nonop, "cost"])
+    if tax < 0:
+        sources.append(["법인세 환급", -tax, "rev"])
+    elif tax > 0:
+        sinks.append(["법인세", tax, "cost"])
+    rest = sum(v for _, v, _ in sources) - sum(v for _, v, _ in sinks) - ni
+    if rest > thr:  # minority interest, discontinued operations, ...
+        sinks.append(["기타(소수지분 등)", rest, "cost"])
+    elif rest < -thr:
+        sources.append(["기타 이익", -rest, "rev"])
+    # A gain under 1% of revenue would be a hairline from the far left: leave it out (net
+    # income's link is then that much thinner; its label still shows the reported amount).
+    sources = [src for src in sources if src[0] == OP or src[1] >= 0.01 * rev]
+    sinks.append([NI, ni, "profit"])
+    # each sink is paid from the sources in order (operating income first)
+    si = 0
+    for name, need, kind in sinks:
+        while need > thr / 10 and si < len(sources):
+            src = sources[si]
+            take = min(need, src[1])
+            if take > 0:
+                links.append((src[0], name, take, kind if src[0] == OP else "rev"))
+            src[1] -= take
+            need -= take
+            if src[1] <= thr / 10:
+                si += 1
+    return {"links": links, "loss": False, "amounts": {NI: ni}}

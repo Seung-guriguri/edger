@@ -600,3 +600,64 @@ def test_tradingview_symbol():
     assert tradingview_symbol("BRK.B", ["NYSE"]) == "NYSE:BRK.B"
     assert tradingview_symbol("SPY", ["NYSE Arca"]) == "AMEX:SPY"
     assert tradingview_symbol("XYZ", []) == "XYZ"  # TradingView resolves bare tickers
+
+
+def _balance(flow):
+    """Inflow == outflow for every intermediate node."""
+    ins, outs = {}, {}
+    for s, t, v, _ in flow["links"]:
+        assert v > 0
+        outs[s] = outs.get(s, 0) + v
+        ins[t] = ins.get(t, 0) + v
+    for n in set(ins) & set(outs):
+        assert abs(ins[n] - outs[n]) < 1e-6, n
+    return ins, outs
+
+
+def test_income_flow_profit_path():
+    from edger.metrics import income_flow
+    row = pd.Series({"revenue": 100.0, "cost_of_revenue": 55.0, "rnd": 8.0, "sga": 7.0,
+                     "operating_income": 30.0, "pretax_income": 31.0, "income_tax": 6.0,
+                     "net_income": 25.0})
+    flow = income_flow(row)
+    ins, outs = _balance(flow)
+    assert not flow["loss"]
+    assert ins["매출총이익"] == 45 and ins["영업이익"] == 30
+    assert "기타 영업비용" not in ins  # costs add up exactly
+    assert ins["법인세"] == 6 and ins["순이익"] == 25  # 1 of non-operating gain flows in too
+    assert flow["amounts"]["순이익"] == 25
+
+
+def test_income_flow_small_gain_and_tax_benefit():
+    from edger.metrics import income_flow
+    # gain under 1% of revenue is dropped (no hairline), net income label keeps the real amount
+    row = pd.Series({"revenue": 1000.0, "cost_of_revenue": 600.0, "operating_income": 300.0,
+                     "pretax_income": 305.0, "income_tax": 60.0, "net_income": 245.0})
+    flow = income_flow(row)
+    ins, _ = _balance(flow)
+    assert "영업외 이익" not in ins and not any(s == "영업외 이익" for s, *_ in flow["links"])
+    assert ins["순이익"] == 240 and flow["amounts"]["순이익"] == 245
+    # tax benefit is an inflow into net income
+    row = pd.Series({"revenue": 100.0, "operating_income": 10.0, "pretax_income": 10.0,
+                     "income_tax": -3.0, "net_income": 13.0})
+    flow = income_flow(row)
+    ins, _ = _balance(flow)
+    assert ("법인세 환급", "순이익", 3.0, "rev") in flow["links"] and ins["순이익"] == 13
+
+
+def test_income_flow_loss_and_segments():
+    from edger.metrics import income_flow
+    flow = income_flow(pd.Series({"revenue": 100.0, "cost_of_revenue": 90.0, "sga": 20.0,
+                                  "operating_income": -10.0}))
+    ins, outs = _balance(flow)
+    assert flow["loss"] and ins["총비용"] == 110
+    row = pd.Series({"revenue": 100.0, "operating_income": 20.0})
+    # parts that do not add up to revenue are skipped; a "기타" part is renamed
+    assert not any(k == "rev" for *_, k in income_flow(row, segments=pd.Series({"A": 60.0, "B": 30.0}))["links"])
+    links = income_flow(row, segments=pd.Series({"A": 60.0, "기타": 40.0}))["links"]
+    assert ("기타 매출", "매출", 40.0, "rev") in links
+    # presented cost lines fold to 5 + 기타 영업비용
+    costs = pd.Series({f"c{i}": 10.0 for i in range(7)} | {"기타": 5.0, "매출원가": 0.0})
+    flow = income_flow(pd.Series({"revenue": 100.0, "operating_income": 25.0}), cost_items=costs)
+    ins, _ = _balance(flow)
+    assert ins["기타 영업비용"] == 25 and sum(1 for n in ins if n.startswith("c")) == 5

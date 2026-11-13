@@ -510,3 +510,56 @@ def per_band(hist: pd.DataFrame, multiples: list[float], mode: str, currency: st
     top = float(hist["price"].max()) * 1.6  # keep the price readable when high bands run off
     fig.update_yaxes(tickprefix=sym, zeroline=False, range=[0, top])
     return fig
+
+
+# ---------------------------------------------------------------- income Sankey
+def income_sankey(flow: dict, mode: str, currency: str = "USD", height: int = 520,
+                  orientation: str = "h") -> go.Figure:
+    """Revenue -> ... -> net income as a Sankey. Profit path in the accent blue, costs in the
+    muted red, revenue sources (segments, non-operating gains, tax benefits) in grey.
+    Every node is labelled with its amount and its share of revenue."""
+    p = PALETTE[mode]
+    links = flow["links"]
+    names: list[str] = []
+    for s, t, _, _ in links:
+        for n in (s, t):
+            if n not in names:
+                names.append(n)
+    idx = {n: i for i, n in enumerate(names)}
+    inflow = {n: 0.0 for n in names}
+    outflow = {n: 0.0 for n in names}
+    kind_of = {}
+    for s, t, v, k in links:
+        inflow[t] += v
+        outflow[s] += v
+        kind_of.setdefault(t, k)
+        kind_of.setdefault(s, "rev" if k == "rev" else "profit")
+    value = {n: max(inflow[n], outflow[n]) for n in names}
+    value.update({n: v for n, v in flow.get("amounts", {}).items() if n in value})
+    revenue = value.get("매출") or max(value.values())
+    color = {"profit": p["series"][0], "cost": p["neg"], "rev": OTHER[mode]}
+    # nodes on the main path are blue even when first seen as a source
+    main = {"매출", "매출총이익", "영업이익", "순이익", "총비용"}
+    node_colors = [color["profit"] if n in main else color[kind_of.get(n, "rev")] for n in names]
+    # small nodes stay unlabelled (their labels would collide); tap shows them, and the list
+    # under the chart carries every amount
+    full = [f"{n} {fmt.money(value[n], currency)}" for n in names]
+    # two short lines fit between the narrow columns of a phone screen
+    labels = [f"{n}<br>{fmt.money(value[n], currency)}" if (value[n] / revenue >= 0.03 if revenue else True) else "" for n in names]
+    fig = go.Figure(go.Sankey(
+        arrangement="snap", orientation=orientation,
+        node=dict(label=labels, color=node_colors, pad=16, thickness=12,
+                  line=dict(color=p["surface"], width=1), customdata=full,
+                  hovertemplate="%{customdata}<extra></extra>"),
+        link=dict(source=[idx[s] for s, _, _, _ in links], target=[idx[t] for _, t, _, _ in links],
+                  value=[v for _, _, v, _ in links],
+                  color=[_alpha(color[k], 0.32 if k != "rev" else 0.45) for _, _, _, k in links],
+                  customdata=[fmt.money(v, currency) for _, _, v, _ in links],
+                  hovertemplate="%{source.customdata} → %{target.customdata}<br><b>%{customdata}</b><extra></extra>"),
+        textfont=dict(family=FONT, size=10, color=p["ink"]),
+    ))
+    fig.update_layout(height=height, margin=dict(l=2, r=2, t=6, b=6), paper_bgcolor="rgba(0,0,0,0)",
+                      font=dict(family=FONT, size=10, color=p["ink"]),
+                      hoverlabel=dict(bgcolor=p["surface"], bordercolor=p["axis"],
+                                      font=dict(family=FONT, size=12, color=p["ink"])))
+    return fig
